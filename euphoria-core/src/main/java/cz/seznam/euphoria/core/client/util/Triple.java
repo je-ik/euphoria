@@ -21,9 +21,11 @@ import java.util.Objects;
  * Triple of any types.
  */
 public class Triple<F, S, T> {
-  final F first;
-  final S second;
-  final T third;
+  public F first;
+  public S second;
+  public T third;
+
+  public Triple() {}
 
   protected Triple(F first, S second, T third) {
     this.first = first;

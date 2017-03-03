@@ -43,4 +43,7 @@ public interface Windowing<T, W extends Window> extends Serializable {
    * @return a {@link Trigger} associated with the current windowing strategy
    */
   Trigger<W> getTrigger();
+
+  default Class<W> getWindowType() { return null; }
+
 }

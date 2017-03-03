@@ -89,5 +89,10 @@ public class Time<T> implements Windowing<T, TimeInterval> {
   public long getDuration() {
     return durationMillis;
   }
+
+  @Override
+  public Class<TimeInterval> getWindowType() {
+    return TimeInterval.class;
+  }
 }
 

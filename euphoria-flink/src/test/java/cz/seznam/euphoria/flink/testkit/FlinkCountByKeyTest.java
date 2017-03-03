@@ -13,29 +13,14 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package cz.seznam.euphoria.core.client.functional;
+package cz.seznam.euphoria.flink.testkit;
 
-import java.io.Serializable;
+import cz.seznam.euphoria.operator.test.CountByKeyTest;
+import cz.seznam.euphoria.operator.test.junit.ExecutorProviderRunner;
+import cz.seznam.euphoria.operator.test.junit.Processing;
+import org.junit.runner.RunWith;
 
-/**
- * Function of single argument.
- *
- * @param <IN> the type of the element processed
- * @param <OUT> the type of the result applying element to the function
- */
-@FunctionalInterface
-public interface UnaryFunction<IN, OUT> extends Serializable {
-  
-  /**
-   * Return the result of this function.
-   *
-   * @param what the element applied to the function
-   *
-   * @return the result of the function application
-   */
-  OUT apply(IN what);
-
-  default Class<OUT> getReturnType() {
-    return null;
-  }
+@RunWith(ExecutorProviderRunner.class)
+@Processing(Processing.Type.BOUNDED)
+public class FlinkCountByKeyTest extends CountByKeyTest implements FlinkExecutorProvider {
 }

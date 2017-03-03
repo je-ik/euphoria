@@ -34,7 +34,7 @@ public final class Batch<T>
 
     public static BatchWindow get() { return INSTANCE; }
 
-    private BatchWindow() {}
+    public BatchWindow() {}
 
     @Override
     public boolean equals(Object other) {

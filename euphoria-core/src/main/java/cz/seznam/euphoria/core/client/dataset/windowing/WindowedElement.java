@@ -21,9 +21,11 @@ package cz.seznam.euphoria.core.client.dataset.windowing;
  */
 public class WindowedElement<W extends Window, T> {
 
-  final T element;
-  W window;
-  long timestamp;
+  public T element;
+  public W window;
+  public long timestamp;
+
+  public WindowedElement() {}
 
   public WindowedElement(W window, long timestamp, T element) {
     this.window = window;

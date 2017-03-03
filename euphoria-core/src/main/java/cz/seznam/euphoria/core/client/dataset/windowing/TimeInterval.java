@@ -19,8 +19,10 @@ public final class TimeInterval
     extends Window
     implements TimedWindow<TimeInterval>, Comparable<TimeInterval> {
 
-  private final long startMillis;
-  private final long endMillis;
+  public long startMillis;
+  public long endMillis;
+
+  public TimeInterval() {}
 
   public TimeInterval(long startMillis, long endMillis) {
     this.startMillis = startMillis;

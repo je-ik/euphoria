@@ -17,6 +17,7 @@ package cz.seznam.euphoria.operator.test;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.dataset.windowing.Time;
+import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.operator.CountByKey;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.operator.test.junit.AbstractOperatorTest;
@@ -43,7 +44,16 @@ public class CountByKeyTest extends AbstractOperatorTest {
       protected Dataset<Pair<Integer, Long>> getOutput(
           Dataset<Integer> input) {
         return CountByKey.of(input)
-            .keyBy(e -> e)
+            .keyBy(new UnaryFunction<Integer, Integer>() {
+              @Override
+              public Integer apply(Integer what) {
+                return what;
+              }
+              @Override
+              public Class<Integer> getReturnType() {
+                return Integer.class;
+              }
+            })
             .setPartitioner(i -> i)
             .windowBy(Time.of(Duration.ofSeconds(1)))
             .output();

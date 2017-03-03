@@ -81,6 +81,11 @@ public final class TimeSliding<T>
   }
 
   @Override
+  public Class<TimeInterval> getWindowType() {
+    return TimeInterval.class;
+  }
+
+  @Override
   public String toString() {
     return "TimeSliding{" +
         "duration=" + duration +

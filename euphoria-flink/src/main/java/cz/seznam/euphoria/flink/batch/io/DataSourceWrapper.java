@@ -21,6 +21,7 @@ import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.io.DataSource;
 import cz.seznam.euphoria.core.client.io.Partition;
 import cz.seznam.euphoria.core.client.io.Reader;
+import cz.seznam.euphoria.flink.batch.WindowedElements;
 import org.apache.flink.api.common.io.InputFormat;
 import org.apache.flink.api.common.io.statistics.BaseStatistics;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
@@ -106,6 +107,6 @@ public class DataSourceWrapper<T>
   @Override
   @SuppressWarnings("unchecked")
   public TypeInformation<T> getProducedType() {
-    return TypeInformation.of((Class) WindowedElement.class);
+    return (TypeInformation) WindowedElements.of(Batch.BatchWindow.class, Object.class);
   }
 }

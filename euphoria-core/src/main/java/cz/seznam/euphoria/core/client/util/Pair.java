@@ -73,8 +73,10 @@ public class Pair<K, V> implements java.util.Map.Entry<K, V> {
 
   // ~ -----------------------------------------------------------------------------
 
-  final K first;
-  final V second;
+  public K first;
+  public V second;
+
+  public Pair() {}
 
   protected Pair(K first, V second) {
     this.first = first;

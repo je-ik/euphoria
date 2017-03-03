@@ -26,17 +26,26 @@ import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.flink.FlinkOperator;
-import cz.seznam.euphoria.flink.Utils;
 import cz.seznam.euphoria.flink.functions.PartitionerWrapper;
+import org.apache.flink.api.common.functions.MapFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
-import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.api.common.operators.base.ReduceOperatorBase;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.DataSet;
+import org.apache.flink.api.java.functions.FunctionAnnotation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.operators.FlatMapOperator;
 import org.apache.flink.api.java.operators.Operator;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.tuple.Tuple4;
+import org.apache.flink.api.java.typeutils.PojoField;
+import org.apache.flink.api.java.typeutils.PojoTypeInfo;
+import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
+import org.apache.flink.api.java.typeutils.TupleTypeInfo;
+import org.apache.flink.api.java.typeutils.TypeExtractor;
 
 import java.util.Arrays;
+import java.util.Objects;
 import java.util.Set;
 
 public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKey> {
@@ -77,13 +86,16 @@ public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKe
     final UnaryFunction udfKey = origOperator.getKeyExtractor();
     final UnaryFunction udfValue = origOperator.getValueExtractor();
 
+    Objects.requireNonNull(udfKey.getReturnType());
+    Objects.requireNonNull(windowing.getWindowType());
+
     // ~ extract key/value from input elements and assign windows
-    DataSet<WindowedElement<Window, Pair>> tuples;
+    DataSet<Tuple4<Long, Window, Comparable, Object>> tuples;
     {
       // FIXME require keyExtractor to deliver `Comparable`s
 
       UnaryFunction<Object, Long> timeAssigner = origOperator.getEventTimeAssigner();
-      FlatMapOperator<Object, WindowedElement<Window, Pair>> wAssigned =
+      FlatMapOperator<Object, Tuple4<Long, Window, Comparable, Object>> wAssigned =
           input.flatMap((i, c) -> {
             WindowedElement wel = (WindowedElement) i;
             if (timeAssigner != null) {
@@ -96,21 +108,26 @@ public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKe
               long stamp = (wid instanceof TimedWindow)
                   ? ((TimedWindow) wid).maxTimestamp()
                   : wel.getTimestamp();
-              c.collect(new WindowedElement<>(
-                  wid, stamp, Pair.of(udfKey.apply(el), udfValue.apply(el))));
+              c.collect(new Tuple4<>(stamp, wid, udfKey.apply(el), udfValue.apply(el)));
             }
           });
       tuples = wAssigned
           .name(operator.getName() + "::map-input")
           .setParallelism(operator.getParallelism())
-          .returns(new TypeHint<WindowedElement<Window, Pair>>() {});
+          .returns(new TupleTypeInfo<>(
+              TypeExtractor.createTypeInfo(Long.class),
+              TypeExtractor.createTypeInfo(windowing.getWindowType()),
+              TypeExtractor.createTypeInfo(udfKey.getReturnType()),
+              TypeExtractor.createTypeInfo(Object.class)));
     }
 
     // ~ reduce the data now
-    Operator<WindowedElement<Window, Pair>, ?> reduced;
+    Operator<Tuple4<Long, Window, Comparable, Object>, ?> reduced;
     reduced = tuples
-        .groupBy(new RBKKeySelector())
-        .reduce(new RBKReducer(reducer));
+        .groupBy(new RBKKeySelector(windowing.getWindowType(), udfKey.getReturnType()))
+        .reduce(new RBKReducer(reducer, windowing.getWindowType(), udfKey.getReturnType()))
+        // ~ use hash-based reduction to avoid deserialization of the values
+        .setCombineHint(ReduceOperatorBase.CombineHint.HASH);
     reduced = reduced
         .setParallelism(operator.getParallelism())
         .name(operator.getName() + "::reduce");
@@ -123,54 +140,89 @@ public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKe
     if (!origOperator.getPartitioning().hasDefaultPartitioner()) {
       reduced = reduced
           .partitionCustom(
-              new PartitionerWrapper<>(origOperator.getPartitioning().getPartitioner()),
-              Utils.wrapQueryable(
-                  (KeySelector<WindowedElement<Window, Pair>, Comparable>)
-                      (WindowedElement<Window, Pair> we) -> (Comparable) we.getElement().getKey(),
-                  Comparable.class))
+              new PartitionerWrapper<>(origOperator.getPartitioning().getPartitioner()), 2)
           .setParallelism(operator.getParallelism());
     }
 
-    return reduced;
+    return reduced.map((MapFunction<Tuple4<Long, Window, Comparable, Object>,
+        WindowedElement<Window, Pair<Comparable, Object>>>) in -> new WindowedElement<>(in.f1, in.f0, Pair.of(in.f2, in.f3)))
+        .returns(outputType(windowing.getWindowType(), udfKey.getReturnType()))
+        .setParallelism(operator.getParallelism())
+        .name("::map-to-windowed-element");
   }
 
   // ------------------------------------------------------------------------------
+
+  @SuppressWarnings("unchecked")
+  static <W extends Window, K> TypeInformation<WindowedElement<W, Pair<K, Object>>>
+  outputType(Class<W> windowType, Class<K> keyType) {
+    try {
+      return WindowedElements.of(windowType, new PojoTypeInfo(Pair.class,
+          Arrays.asList(
+              new PojoField(Pair.class.getField("first"), TypeExtractor.createTypeInfo(keyType)),
+              new PojoField(Pair.class.getField("second"), TypeExtractor.createTypeInfo(Object.class)))));
+    } catch (NoSuchFieldException e) {
+      throw new RuntimeException(e);
+    }
+  }
 
   /**
    * Produces Tuple2[Window, Element Key]
    */
   @SuppressWarnings("unchecked")
-  static class RBKKeySelector
-          implements KeySelector<WindowedElement<Window, Pair>, Tuple2<Comparable, Comparable>> {
-    
-    @Override
-    public Tuple2<Comparable, Comparable> getKey(
-            WindowedElement<Window, Pair> value) {
+  static class RBKKeySelector<W, K>
+      implements KeySelector<Tuple4<Long, W, K, Object>, Tuple2<W, K>>,
+      ResultTypeQueryable<Tuple2<W, K>> {
 
-      return new Tuple2(value.getWindow(), value.getElement().getKey());
+    private final TupleTypeInfo<Tuple2<W, K>> tt;
+
+    public RBKKeySelector(Class<W> windowType, Class<K> keyType) {
+      TypeInformation<W> wt = TypeExtractor.getForClass(windowType);
+      TypeInformation<K> kt = TypeExtractor.getForClass(keyType);
+      this.tt = new TupleTypeInfo<>(wt, kt);
+    }
+
+    @Override
+    public Tuple2<W, K> getKey(Tuple4<Long, W, K, Object> in) {
+      return new Tuple2(in.f1, in.f2);
+    }
+
+    @Override
+    public TypeInformation<Tuple2<W, K>> getProducedType() {
+      return tt;
     }
   }
 
-  static class RBKReducer
-        implements ReduceFunction<WindowedElement<Window, Pair>> {
+  @FunctionAnnotation.ForwardedFieldsFirst("f1->f1; f2->f2")
+  static class RBKReducer<W extends Window, K>
+        implements ReduceFunction<Tuple4<Long, W, K, Object>>,
+              ResultTypeQueryable<Tuple4<Long, W, K, Object>> {
 
     final UnaryFunction<Iterable, Object> reducer;
+    final TupleTypeInfo<Tuple4<Long, W, K, Object>> tt;
 
-    RBKReducer(UnaryFunction<Iterable, Object> reducer) {
+    RBKReducer(UnaryFunction<Iterable, Object> reducer, Class<W> windowType, Class<K> keyType) {
       this.reducer = reducer;
+      this.tt = new TupleTypeInfo<>(
+          TypeExtractor.getForClass(Long.class),
+          TypeExtractor.getForClass(windowType),
+          TypeExtractor.getForClass(keyType),
+          TypeExtractor.getForClass(Object.class));
     }
 
     @Override
-    public WindowedElement<Window, Pair>
-    reduce(WindowedElement<Window, Pair> p1, WindowedElement<Window, Pair> p2) {
+    public Tuple4<Long, W, K, Object>
+    reduce(Tuple4<Long, W, K, Object> p1, Tuple4<Long, W, K, Object> p2) {
+      return new Tuple4<>(
+          Math.max(p1.f0, p2.f0), // max. stamp
+          p1.f1, // window
+          p1.f2, // key
+          reducer.apply(Arrays.asList(p1.f3, p2.f3)));
+    }
 
-      Window wid = p1.getWindow();
-      return new WindowedElement<>(
-          wid,
-          Math.max(p1.getTimestamp(), p2.getTimestamp()),
-          Pair.of(
-              p1.getElement().getKey(),
-              reducer.apply(Arrays.asList(p1.getElement().getSecond(), p2.getElement().getSecond()))));
+    @Override
+    public TypeInformation<Tuple4<Long, W, K, Object>> getProducedType() {
+      return tt;
     }
   }
 }
