@@ -16,7 +16,7 @@
 package cz.seznam.euphoria.flink.streaming.windowing;
 
 
-import cz.seznam.euphoria.flink.streaming.StreamingWindowedElement;
+import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import org.apache.flink.streaming.api.windowing.windows.Window;
 
 import java.util.Objects;
@@ -31,7 +31,7 @@ public class AttachedWindow<WID extends cz.seznam.euphoria.core.client.dataset.w
   // because RocksDB uses that form as a key in state backend
   private transient final long emissionWatermark;
 
-  public AttachedWindow(StreamingWindowedElement<WID, ?> element) {
+  public AttachedWindow(WindowedElement<WID, ?> element) {
     this(element.getWindow(), element.getTimestamp());
   }
 

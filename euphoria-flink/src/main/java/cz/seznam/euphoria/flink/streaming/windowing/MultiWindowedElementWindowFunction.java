@@ -16,8 +16,8 @@
 package cz.seznam.euphoria.flink.streaming.windowing;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
+import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.util.Pair;
-import cz.seznam.euphoria.flink.streaming.StreamingWindowedElement;
 import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
 import org.apache.flink.util.Collector;
 
@@ -30,7 +30,7 @@ import org.apache.flink.util.Collector;
 public class MultiWindowedElementWindowFunction<WID extends Window, KEY, VALUE>
     implements WindowFunction<
     MultiWindowedElement<?, Pair<KEY, VALUE>>,
-        StreamingWindowedElement<WID, Pair<KEY, VALUE>>,
+        WindowedElement<WID, Pair<KEY, VALUE>>,
     KEY,
     FlinkWindow<WID>> {
 
@@ -39,11 +39,11 @@ public class MultiWindowedElementWindowFunction<WID extends Window, KEY, VALUE>
       KEY key,
       FlinkWindow<WID> window,
       Iterable<MultiWindowedElement<?, Pair<KEY, VALUE>>> input,
-      Collector<StreamingWindowedElement<WID, Pair<KEY, VALUE>>> out) {
+      Collector<WindowedElement<WID, Pair<KEY, VALUE>>> out) {
     for (MultiWindowedElement<?, Pair<KEY, VALUE>> i : input) {
       WID wid = window.getWindowID();
       out.collect(
-          new StreamingWindowedElement<>(
+          new WindowedElement<>(
               wid,
               window.getEmissionWatermark(),
               Pair.of(i.getElement().getFirst(), i.getElement().getSecond())));

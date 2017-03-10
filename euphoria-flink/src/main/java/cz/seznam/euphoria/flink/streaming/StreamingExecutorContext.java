@@ -16,6 +16,7 @@
 package cz.seznam.euphoria.flink.streaming;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
+import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.graph.DAG;
@@ -69,7 +70,7 @@ public class StreamingExecutorContext
    */
   public <T, WID extends Window, KEY, VALUE>
   WindowedStream<MultiWindowedElement<WID, Pair<KEY, VALUE>>, KEY, FlinkWindow<WID>>
-  flinkWindow(DataStream<StreamingWindowedElement<?, T>> input,
+  flinkWindow(DataStream<WindowedElement<?, T>> input,
               UnaryFunction<T, KEY> keyFn,
               UnaryFunction<T, VALUE> valFn,
               Windowing<T, WID> windowing,
@@ -81,7 +82,7 @@ public class StreamingExecutorContext
   /**
    * Creates an attached window stream, presuming a preceding non-attached
    * windowing on the input data stream forwarding
-   * {@link StreamingWindowedElement#getTimestamp} of the windows to attach to.
+   * {@link WindowedElement#getTimestamp} of the windows to attach to.
    *
    * @param <T> the type of input elements
    * @param <WID> the type of windows produced
@@ -95,9 +96,9 @@ public class StreamingExecutorContext
    * @return a windowed stream attached to the windowing of the original input stream
    */
   <T, WID extends Window, KEY, VALUE>
-  WindowedStream<StreamingWindowedElement<WID, Pair<KEY, VALUE>>,
+  WindowedStream<WindowedElement<WID, Pair<KEY, VALUE>>,
       KEY, AttachedWindow<WID>>
-  attachedWindowStream(DataStream<StreamingWindowedElement<WID, T>> input,
+  attachedWindowStream(DataStream<WindowedElement<WID, T>> input,
                        UnaryFunction<T, KEY> keyFn,
                        UnaryFunction<T, VALUE> valFn)
   {

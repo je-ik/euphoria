@@ -16,6 +16,8 @@
 package cz.seznam.euphoria.flink.streaming;
 
 import com.google.common.collect.Iterables;
+import cz.seznam.euphoria.core.client.dataset.windowing.ElementProvider;
+import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.functional.StateFactory;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
@@ -59,7 +61,7 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
     FlinkStreamingStateStorageProvider storageProvider
         = new FlinkStreamingStateStorageProvider();
 
-    DataStream<StreamingWindowedElement<?, Pair>> folded;
+    DataStream<WindowedElement<?, Pair>> folded;
     // apply windowing first
     if (windowing == null) {
       WindowedStream windowed =
@@ -97,7 +99,7 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
           KEY, VALUEIN, VALUEOUT,
           W extends Window & WindowProperties<WID>>
           extends RichWindowFunction<ElementProvider<? extends Pair<KEY, VALUEIN>>,
-          StreamingWindowedElement<WID, Pair<KEY, VALUEOUT>>,
+          WindowedElement<WID, Pair<KEY, VALUEOUT>>,
           KEY, W> {
 
     private final StateFactory<?, State> stateFactory;
@@ -121,7 +123,7 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
         KEY key,
         W window,
         Iterable<ElementProvider<? extends Pair<KEY, VALUEIN>>> input,
-        Collector<StreamingWindowedElement<WID, Pair<KEY, VALUEOUT>>> out)
+        Collector<WindowedElement<WID, Pair<KEY, VALUEOUT>>> out)
         throws Exception {
 
       Iterator<ElementProvider<? extends Pair<KEY, VALUEIN>>> it = input.iterator();
@@ -135,7 +137,7 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
           new Context() {
             @Override
             public void collect(Object elem) {
-              out.collect(new StreamingWindowedElement(wid, emissionWatermark, Pair.of(key, elem)));
+              out.collect(new WindowedElement(wid, emissionWatermark, Pair.of(key, elem)));
             }
             @Override
             public Object getWindow() {

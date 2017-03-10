@@ -17,11 +17,11 @@ package cz.seznam.euphoria.flink.streaming.windowing;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
+import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.flink.Utils;
-import cz.seznam.euphoria.flink.streaming.StreamingWindowedElement;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.KeyedStream;
@@ -46,28 +46,28 @@ public class StreamWindower {
 
   @SuppressWarnings("unchecked")
   public <WID extends Window, T, KEY, VALUE>
-  WindowedStream<StreamingWindowedElement<WID, Pair<KEY, VALUE>>,
+  WindowedStream<WindowedElement<WID, Pair<KEY, VALUE>>,
                  KEY,
                  AttachedWindow<WID>>
-  attachedWindow(DataStream<StreamingWindowedElement<WID, T>> input,
+  attachedWindow(DataStream<WindowedElement<WID, T>> input,
                       UnaryFunction<T, KEY> keyFn,
                       UnaryFunction<T, VALUE> valFn)
   {
-    DataStream<StreamingWindowedElement<WID, Pair<KEY, VALUE>>> mapped
+    DataStream<WindowedElement<WID, Pair<KEY, VALUE>>> mapped
         = input.map(i -> {
           T elem = i.getElement();
           KEY key = keyFn.apply(elem);
           VALUE val = valFn.apply(elem);
           WID wid = i.getWindow();
-          return new StreamingWindowedElement<>(
+          return new WindowedElement<>(
                   wid,
                   // ~ forward the emission watermark
                   i.getTimestamp(),
                   Pair.of(key, val));
         })
         .setParallelism(input.getParallelism())
-        .returns((Class) StreamingWindowedElement.class);
-    final KeyedStream<StreamingWindowedElement<WID, Pair<KEY, VALUE>>, KEY> keyed;
+        .returns((Class) WindowedElement.class);
+    final KeyedStream<WindowedElement<WID, Pair<KEY, VALUE>>, KEY> keyed;
     keyed = mapped.keyBy(Utils.wrapQueryable(new WeKeySelector<>()));
     return keyed.window(new AttachedWindowAssigner<>());
   }
@@ -75,7 +75,7 @@ public class StreamWindower {
   @SuppressWarnings("unchecked")
   public <T, WID extends Window, KEY, VALUE>
   WindowedStream<MultiWindowedElement<WID, Pair<KEY, VALUE>>, KEY, FlinkWindow<WID>>
-  window(DataStream<StreamingWindowedElement<?, T>> input,
+  window(DataStream<WindowedElement<?, T>> input,
       UnaryFunction<T, KEY> keyFn,
       UnaryFunction<T, VALUE> valFn,
       Windowing<T, WID> windowing,
@@ -120,10 +120,10 @@ public class StreamWindower {
   }
 
   static final class WeKeySelector<WID extends Window, KEY, VALUE> implements
-      KeySelector<StreamingWindowedElement<WID, Pair<KEY, VALUE>>, KEY>
+      KeySelector<WindowedElement<WID, Pair<KEY, VALUE>>, KEY>
   {
     @Override
-    public KEY getKey(StreamingWindowedElement<WID, Pair<KEY, VALUE>> value)
+    public KEY getKey(WindowedElement<WID, Pair<KEY, VALUE>> value)
           throws Exception
     {
       return value.getElement().getKey();
@@ -131,7 +131,7 @@ public class StreamWindower {
   }
 
   static class EventTimeAssigner<T>
-      extends BoundedOutOfOrdernessTimestampExtractor<StreamingWindowedElement<?, T>>
+      extends BoundedOutOfOrdernessTimestampExtractor<WindowedElement<?, T>>
   {
     private final UnaryFunction<T, Long> eventTimeFn;
 
@@ -141,7 +141,7 @@ public class StreamWindower {
     }
 
     @Override
-    public long extractTimestamp(StreamingWindowedElement<?, T> element) {
+    public long extractTimestamp(WindowedElement<?, T> element) {
       return eventTimeFn.apply(element.getElement());
     }
   }

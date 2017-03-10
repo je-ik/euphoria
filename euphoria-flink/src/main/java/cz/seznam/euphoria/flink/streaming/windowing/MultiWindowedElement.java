@@ -16,7 +16,7 @@
 package cz.seznam.euphoria.flink.streaming.windowing;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
-import cz.seznam.euphoria.flink.streaming.ElementProvider;
+import cz.seznam.euphoria.core.client.dataset.windowing.ElementProvider;
 
 import java.util.Set;
 

@@ -19,7 +19,7 @@ package cz.seznam.euphoria.core.client.dataset.windowing;
  * A single data element flowing in dataset. Every such element
  * is associated with a window identifier and timestamp.
  */
-public class WindowedElement<W extends Window, T> {
+public class WindowedElement<W extends Window, T> implements ElementProvider<T> {
 
   final T element;
   W window;
@@ -47,6 +47,7 @@ public class WindowedElement<W extends Window, T> {
     this.timestamp = timestamp;
   }
 
+  @Override
   public T getElement() {
     return element;
   }
