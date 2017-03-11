@@ -17,37 +17,45 @@ package cz.seznam.euphoria.flink.streaming;
 
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Iterators;
+import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.flink.FlinkOperator;
+import cz.seznam.euphoria.flink.Utils;
 import cz.seznam.euphoria.flink.functions.IteratorIterable;
 import cz.seznam.euphoria.flink.functions.PartitionerWrapper;
 import cz.seznam.euphoria.flink.streaming.windowing.FlinkWindow;
+import cz.seznam.euphoria.flink.streaming.windowing.FlinkWindowTrigger;
 import cz.seznam.euphoria.flink.streaming.windowing.MultiWindowedElement;
 import cz.seznam.euphoria.flink.streaming.windowing.MultiWindowedElementWindowFunction;
+import org.apache.flink.api.common.ExecutionConfig;
+import org.apache.flink.api.common.functions.FoldFunction;
 import org.apache.flink.api.common.functions.ReduceFunction;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
+import org.apache.flink.api.java.typeutils.runtime.kryo.KryoSerializer;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.KeyedStream;
 import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.datastream.WindowedStream;
-import org.apache.flink.streaming.api.functions.windowing.PassThroughWindowFunction;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.windowing.WindowFunction;
+import org.apache.flink.streaming.api.windowing.assigners.WindowAssigner;
+import org.apache.flink.streaming.api.windowing.triggers.Trigger;
 import org.apache.flink.streaming.api.windowing.windows.Window;
 import org.apache.flink.util.Collector;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.Iterator;
-import java.util.Set;
+import java.util.*;
+import java.util.stream.Collectors;
 
+@SuppressWarnings("unchecked")
 class ReduceByKeyTranslator implements StreamingOperatorTranslator<ReduceByKey> {
 
   @Override
-  @SuppressWarnings("unchecked")
   public DataStream<?> translate(FlinkOperator<ReduceByKey> operator,
                                  StreamingExecutorContext context) {
     DataStream<?> input =
@@ -63,29 +71,22 @@ class ReduceByKeyTranslator implements StreamingOperatorTranslator<ReduceByKey> 
     // apply windowing first
     SingleOutputStreamOperator<WindowedElement<?, Pair>> reduced;
     if (windowing == null) {
-      WindowedStream windowed =
-          context.attachedWindowStream((DataStream) input, keyExtractor, valueExtractor);
-      if (origOperator.isCombinable()) {
-        // reduce incrementally
-        reduced = windowed.apply(
-            new WindowedElementIncrementalReducer(reducer), new PassThroughWindowFunction<>());
-      } else {
-        // reduce all elements at once when the window is fired
-        reduced = windowed.apply(
-            new WindowedElementWindowedReducer(reducer, new PassThroughWindowFunction<>()));
-      }
+      throw new UnsupportedOperationException("OOPS - no attached windowing");
     } else {
-      WindowedStream windowed = context.flinkWindow(
-              (DataStream) input, keyExtractor, valueExtractor, windowing, eventTimeAssigner);
+      input = context.windower.applyEventTime((DataStream) input, eventTimeAssigner);
       if (origOperator.isCombinable()) {
-        // reduce incrementally
-        reduced = windowed.apply(
-            new MultiWindowedElementIncrementalReducer(reducer), new MultiWindowedElementWindowFunction());
+        KeySelector kvKeySelector =
+                Utils.wrapQueryable((WindowedElement we) -> keyExtractor.apply(we.getElement()));
+        KeyedStream keyed = input.keyBy(kvKeySelector);
+        if (windowing instanceof MergingWindowing) {
+          throw new UnsupportedOperationException("OOPS - no merging windowing");
+        }
 
+        WindowedStream windowed = keyed.window(new WX_WindowAssigner(windowing));
+        // reduce incrementally
+        reduced = windowed.apply(null, new WX_IncrementalReducer(valueExtractor, reducer), new WX_WindowFunction());
       } else {
-        // reduce all elements at once when the window is fired
-        reduced = windowed.apply(
-            new MultiWindowedElementWindowedReducer(reducer, new MultiWindowedElementWindowFunction()));
+        throw new UnsupportedOperationException("OOPS - no non-combining reduce");
       }
     }
 
@@ -107,6 +108,97 @@ class ReduceByKeyTranslator implements StreamingOperatorTranslator<ReduceByKey> 
     return out;
   }
 
+  private static class WX_IncrementalReducer<I, O>
+          implements FoldFunction<WindowedElement<?, I>, O>,
+          ResultTypeQueryable<O> {
+
+    final UnaryFunction<Iterable<O>, O> reducer;
+    final UnaryFunction<I, O> valueFn;
+
+    public WX_IncrementalReducer(UnaryFunction<I, O> valueFn, UnaryFunction<Iterable<O>, O> reducer) {
+      this.valueFn = valueFn;
+      this.reducer = reducer;
+    }
+
+    @Override
+    public O fold(O accumulator, WindowedElement<?, I> input) throws Exception {
+      O value = valueFn.apply(input.getElement());
+      return accumulator == null ? value : reducer.apply(Arrays.asList(accumulator, value));
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public TypeInformation<O> getProducedType() {
+      return TypeInformation.of((Class) Object.class);
+    }
+  }
+
+  public class WX_WindowFunction<WID extends cz.seznam.euphoria.core.client.dataset.windowing.Window, KEY, VALUE>
+          implements WindowFunction<
+          VALUE,
+          WindowedElement<WID, Pair<KEY, VALUE>>,
+          KEY,
+          FlinkWindow<WID>> {
+
+    @Override
+    public void apply(KEY key,
+                      FlinkWindow<WID> window,
+                      Iterable<VALUE> input,
+                      Collector<WindowedElement<WID, Pair<KEY, VALUE>>> out)
+            throws Exception {
+      for (VALUE i : input) {
+        out.collect(new WindowedElement<>(
+                window.getWindowID(),
+                window.getEmissionWatermark(),
+                Pair.of(key, i)));
+      }
+    }
+  }
+
+  //  ~ basically a copy of FlinkWindowAssigner dependent on WindowedElement instead of MultiWindowedElementWindowFunction
+  private static class WX_WindowAssigner<T, WID extends cz.seznam.euphoria.core.client.dataset.windowing.Window>
+          extends WindowAssigner<WindowedElement<WID, T>, FlinkWindow<WID>> {
+
+    private final Windowing<T, WID> windowing;
+
+    public WX_WindowAssigner(Windowing<T, WID> windowing) {
+      this.windowing = windowing;
+    }
+
+    Windowing<T, WID> getWindowing() {
+      return this.windowing;
+    }
+
+    @Override
+    public Collection<FlinkWindow<WID>> assignWindows(
+            WindowedElement<WID, T> element,
+            long timestamp, WindowAssignerContext context) {
+
+      return this.windowing.assignWindowsToElement(element)
+              // map collection of Euphoria WIDs to FlinkWindows
+              .stream()
+              .map(FlinkWindow::new)
+              .collect(Collectors.toList());
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public Trigger<WindowedElement<WID, T>, FlinkWindow<WID>> getDefaultTrigger(
+            StreamExecutionEnvironment env) {
+      return new FlinkWindowTrigger(windowing.getTrigger());
+    }
+
+    @Override
+    public org.apache.flink.api.common.typeutils.TypeSerializer<FlinkWindow<WID>>
+    getWindowSerializer(ExecutionConfig executionConfig) {
+      return new KryoSerializer(FlinkWindow.class, executionConfig);
+    }
+
+    @Override
+    public boolean isEventTime() {
+      return true;
+    }
+  }
   /**
    * Performs incremental reduction (in case of combining reduce).
    */

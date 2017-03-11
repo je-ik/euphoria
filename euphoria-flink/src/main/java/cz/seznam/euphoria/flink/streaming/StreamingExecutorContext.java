@@ -38,7 +38,7 @@ import java.util.Objects;
 public class StreamingExecutorContext
     extends ExecutorContext<StreamExecutionEnvironment, DataStream<?>> {
 
-  private final StreamWindower windower;
+  public final StreamWindower windower;
 
   public StreamingExecutorContext(StreamExecutionEnvironment env,
                                   DAG<FlinkOperator<?>> dag,

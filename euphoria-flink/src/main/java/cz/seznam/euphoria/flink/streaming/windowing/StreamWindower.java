@@ -38,7 +38,7 @@ import java.util.Objects;
  */
 public class StreamWindower {
 
-  private final Duration allowedLateness;
+  public final Duration allowedLateness;
 
   public StreamWindower(Duration allowedLateness) {
     this.allowedLateness = Objects.requireNonNull(allowedLateness);
@@ -127,6 +127,25 @@ public class StreamWindower {
           throws Exception
     {
       return value.getElement().getKey();
+    }
+  }
+
+  @SuppressWarnings("unchecked")
+  public <W extends Window, T> DataStream<WindowedElement<W, T>>
+  applyEventTime(DataStream<WindowedElement<W, T>> ds, UnaryFunction<T, Long> eventTime)
+  {
+    if (eventTime == null) {
+      return ds;
+    } else {
+      ds = ds.assignTimestampsAndWatermarks(new EventTimeAssigner(allowedLateness, eventTime));
+      ds = ds.map(d -> {
+          T el = d.getElement();
+          return new WindowedElement<>(d.getWindow(), eventTime.apply(el), el);
+        })
+        .name("ASSIGN-EVENT-TIME")
+        .setParallelism(ds.getParallelism())
+        .returns((Class) WindowedElement.class);
+      return ds;
     }
   }
 
