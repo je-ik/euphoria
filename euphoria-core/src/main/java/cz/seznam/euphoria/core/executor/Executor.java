@@ -58,5 +58,6 @@ public interface Executor {
    * Execution (job) result. Should contain aggregators, etc.
    */
   public static class Result {
+    
   }
 }

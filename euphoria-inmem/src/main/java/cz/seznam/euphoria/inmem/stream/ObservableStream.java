@@ -22,7 +22,7 @@ import java.util.UUID;
  * A stream that can be observed by observers.
  */
 @FunctionalInterface
-public interface StreamObservable<T> {
+public interface ObservableStream<T> {
 
   /**
    * Start observing the stream with named observer.

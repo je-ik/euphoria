@@ -16,22 +16,25 @@
 
 package cz.seznam.euphoria.inmem.stream;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Executor;
 
 /**
  * A stream observer with implementation wrap {@code BlockingQueue}.
  */
-public class BlockingQueueStreamObservable<T> implements StreamObservable<T> {
+public class BlockingQueueStreamObservable<T extends StreamElement<?>>
+    implements ObservableStream<T> {
 
   /**
    * Create the observable from blocking queue.
    * @param <T> the type of the elements in the queue
    * @param executor the executor to use to execute asynchronous tasks
    * @param queue the blocking queue to wrap the observable around
-   * @return the wrapped {@code StreamObservable}
+   * @return the wrapped {@code ObservableStream}
    */
-  public static <T> BlockingQueueStreamObservable<T> wrap(
+  public static <T extends StreamElement<?>> BlockingQueueStreamObservable<T> wrap(
       Executor executor,
       BlockingQueue<T> queue) {
 
@@ -40,6 +43,7 @@ public class BlockingQueueStreamObservable<T> implements StreamObservable<T> {
 
   private final Executor executor;
   private final BlockingQueue<T> queue;
+  private final List<StreamObserver<T>> observers = new ArrayList<>();
 
   private BlockingQueueStreamObservable(
       Executor executor, BlockingQueue<T> queue) {
@@ -50,21 +54,39 @@ public class BlockingQueueStreamObservable<T> implements StreamObservable<T> {
 
   @Override
   public void observe(String name, StreamObserver<T> observer) {
-    executor.execute(() -> {
-      try {
-        while (!Thread.currentThread().isInterrupted()) {
+
+    synchronized (observers) { 
+      if (observers.isEmpty()) {
+        executor.execute(() -> {
           try {
-            T elem = queue.take();
-            observer.onNext(elem);
-          } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            observer.onCompleted();
+            while (!Thread.currentThread().isInterrupted()) {
+              try {
+                T elem = queue.take();
+                if (elem.isEndOfStream()) {
+                  break;
+                }
+                synchronized (observers) {
+                  observers.forEach(o -> o.onNext(elem));
+                }
+              } catch (InterruptedException ex) {
+                Thread.currentThread().interrupt();
+                break;
+              }
+            }
+            synchronized (observers) {
+              observers.forEach(o -> o.onCompleted());
+            }
+
+          } catch (Throwable err) {
+            synchronized (observers) {
+              observers.forEach(o -> o.onError(err));
+            }
           }
-        }
-      } catch (Throwable err) {
-        observer.onError(err);
+        });
       }
-    });
+
+      observers.add(observer);
+    }
   }
 
 

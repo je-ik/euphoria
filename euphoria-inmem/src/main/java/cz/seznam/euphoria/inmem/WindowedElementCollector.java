@@ -18,24 +18,32 @@ package cz.seznam.euphoria.inmem;
 import cz.seznam.euphoria.core.client.dataset.windowing.TimedWindow;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.inmem.stream.StreamElement;
+import cz.seznam.euphoria.inmem.stream.StreamElementFactory;
 
 import java.util.Objects;
 import java.util.function.Supplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-class WindowedElementCollector<T> implements Context<T> {
+public class WindowedElementCollector<T> implements Context<T> {
 
   private static final Logger LOG = LoggerFactory.getLogger(WindowedElementCollector.class);
 
-  private final Collector<Datum> wrap;
+  private final Collector<StreamElement<T>> wrap;
   private final Supplier<Long> stampSupplier;
+  private final StreamElementFactory<T, ? extends StreamElement<T>> elementFactory;
 
   protected Window window;
 
-  WindowedElementCollector(Collector<Datum> wrap, Supplier<Long> stampSupplier) {
+  public WindowedElementCollector(
+      Collector<StreamElement<T>> wrap,
+      Supplier<Long> stampSupplier,
+      StreamElementFactory<T, ? extends StreamElement<T>> elementFactory) {
+
     this.wrap = Objects.requireNonNull(wrap);
     this.stampSupplier = stampSupplier;
+    this.elementFactory = elementFactory;
   }
 
   @Override
@@ -50,14 +58,15 @@ class WindowedElementCollector<T> implements Context<T> {
             : stampSupplier.get();
 
     try {
-      wrap.collect(Datum.of(window, elem, stamp));
+      StreamElement<T> data = elementFactory.data(window, stamp, elem);
+      wrap.collect(data);
     } catch (InterruptedException ex) {
       LOG.warn("Interrupted while collecting element {}", elem);
       Thread.currentThread().interrupt();
     }
   }
 
-  void setWindow(Window window) {
+  public void setWindow(Window window) {
     this.window = window;
   }
 

@@ -21,7 +21,7 @@ import cz.seznam.euphoria.core.client.operator.Operator;
 /**
  * A series of transformations with single output operator.
  */
-class ExecPath {
+public class ExecPath {
 
   /** A DAG of operators. */
   private final DAG<Operator<?, ?>> dag;

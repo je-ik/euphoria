@@ -15,6 +15,8 @@
  */
 package cz.seznam.euphoria.inmem;
 
+import cz.seznam.euphoria.core.client.dataset.Dataset;
+import cz.seznam.euphoria.inmem.runnable.ReduceStateByKeyReducer;
 import cz.seznam.euphoria.core.client.dataset.partitioning.Partitioning;
 import cz.seznam.euphoria.core.client.dataset.windowing.Batch;
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
@@ -37,13 +39,16 @@ import cz.seznam.euphoria.core.client.operator.ReduceStateByKey;
 import cz.seznam.euphoria.core.client.operator.Repartition;
 import cz.seznam.euphoria.core.client.operator.Union;
 import cz.seznam.euphoria.core.client.operator.state.StorageProvider;
-import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.core.executor.Executor;
 import cz.seznam.euphoria.core.executor.FlowUnfolder;
 import cz.seznam.euphoria.core.executor.FlowUnfolder.InputOperator;
+import cz.seznam.euphoria.inmem.runnable.FlatMapper;
 import cz.seznam.euphoria.inmem.stream.BlockingQueueOutputWriter;
 import cz.seznam.euphoria.inmem.stream.BlockingQueueStreamObservable;
+import cz.seznam.euphoria.inmem.stream.ObservableStream;
 import cz.seznam.euphoria.inmem.stream.OutputWriter;
+import cz.seznam.euphoria.inmem.stream.StreamElement;
+import cz.seznam.euphoria.inmem.stream.StreamObserver;
 import cz.seznam.euphoria.shaded.guava.com.google.common.collect.Iterables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -65,9 +70,7 @@ import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.SynchronousQueue;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -83,17 +86,18 @@ public class InMemExecutor implements Executor {
 
   private static final Logger LOG = LoggerFactory.getLogger(InMemExecutor.class);
 
-  @FunctionalInterface
-  private interface Supplier {
-    Datum get() throws InterruptedException;
-  }
-
-  static final class PartitionSupplierStream implements Supplier {
+  static final class PartitionObservableStream implements ObservableStream<Datum> {
 
     final Reader<?> reader;
     final Partition<?> partition;
-    PartitionSupplierStream(Partition<?> partition) {
+    final List<StreamObserver<Datum>> observers = new ArrayList<>();
+    final java.util.concurrent.Executor executor;
+
+    PartitionObservableStream(
+        java.util.concurrent.Executor executor, Partition<?> partition) {
+
       this.partition = partition;
+      this.executor = executor;
       try {
         this.reader = partition.openReader();
       } catch (IOException e) {
@@ -102,8 +106,7 @@ public class InMemExecutor implements Executor {
       }
     }
 
-    @Override
-    public Datum get() {
+    private Datum get() {
       if (!this.reader.hasNext()) {
         try {
           this.reader.close();
@@ -115,16 +118,48 @@ public class InMemExecutor implements Executor {
       }
       Object next = this.reader.next();
       // we assign it to batch
-      // which means null group, and batch label
-      return Datum.of(Batch.BatchWindow.get(), next,
+      return Datum.of(
+          Batch.BatchWindow.get(), next,
           // ingestion time
           System.currentTimeMillis());
+    }
+
+    @Override
+    public void observe(String name, StreamObserver<Datum> observer) {
+      synchronized (observers) {
+        observers.add(observer);
+      }
+    }
+
+    public void startObserving() {
+      executor.execute(() -> {
+        try {
+          while (!Thread.currentThread().isInterrupted()) {
+            Datum elem = get();
+            if (elem.isEndOfStream()) {
+              break;
+            }
+            System.err.println(" ** next " + elem);
+            synchronized (observers) {
+              observers.forEach(o -> o.onNext(elem));
+            }
+          }
+          synchronized (observers) {
+            System.err.println("' *** completed ");
+            observers.forEach(o -> o.onCompleted());
+          }
+        } catch (Throwable err) {
+          synchronized (observers) {
+            observers.forEach(o -> o.onError(err));
+          }
+        }
+      });
     }
   }
 
   /** Partitioned provider of input data for single operator. */
-  private static final class InputProvider implements Iterable<Supplier> {
-    final List<Supplier> suppliers;
+  private static final class InputProvider implements Iterable<ObservableStream<Datum>> {
+    final List<ObservableStream<Datum>> suppliers;
     InputProvider() {
       this.suppliers = new ArrayList<>();
     }
@@ -133,97 +168,95 @@ public class InMemExecutor implements Executor {
       return suppliers.size();
     }
 
-    public void add(Supplier s) {
+    public void add(ObservableStream<Datum> s) {
       suppliers.add(s);
     }
 
-    public Supplier get(int i) {
+    public ObservableStream<Datum> get(int i) {
       return suppliers.get(i);
     }
 
     @Override
-    public Iterator<Supplier> iterator() {
+    public Iterator<ObservableStream<Datum>> iterator() {
       return suppliers.iterator();
     }
 
-    Stream<Supplier> stream() {
+    Stream<ObservableStream<Datum>> stream() {
       return suppliers.stream();
     }
   }
 
-  static class QueueCollector implements Collector<Datum> {
-    static QueueCollector wrap(BlockingQueue<Datum> queue) {
+  public static class QueueCollector implements Collector<StreamElement<?>> {
+    public static QueueCollector wrap(BlockingQueue<StreamElement<?>> queue) {
       return new QueueCollector(BlockingQueueOutputWriter.wrap(queue));
     }
-    static QueueCollector wrap(OutputWriter<Datum> writer) {
+    public static QueueCollector wrap(OutputWriter<StreamElement<?>> writer) {
       return new QueueCollector(writer);
     }
-    private final OutputWriter<Datum> writer;
-    QueueCollector(OutputWriter<Datum> writer) {
+    private final OutputWriter<StreamElement<?>> writer;
+    QueueCollector(OutputWriter<StreamElement<?>> writer) {
       this.writer = writer;
     }
     @Override
-    public void collect(Datum elem) throws InterruptedException {
+    public void collect(StreamElement<?> elem) throws InterruptedException {
       writer.write(elem);
     }
   }
 
-  private static final class QueueSupplier implements Supplier {
-
-    static QueueSupplier wrap(BlockingQueue<Datum> queue) {
-      return new QueueSupplier(queue);
-    }
-
-    private final BlockingQueue<Datum> queue;
-
-    QueueSupplier(BlockingQueue<Datum> queue) {
-      this.queue = queue;
-    }
-
-    @Override
-    public Datum get() throws InterruptedException {
-      return queue.take();
-    }
-  }
-
   private static final class ExecutionContext {
+
     // map of operator inputs to suppliers
-    Map<Pair<Operator<?, ?>, Operator<?, ?>>, InputProvider> materializedOutputs
+    Map<Dataset<?>, InputProvider> materializedOutputs
         = Collections.synchronizedMap(new HashMap<>());
+
     // already running operators
     Set<Operator<?, ?>> runningOperators = Collections.synchronizedSet(
         new HashSet<>());
 
-    private boolean containsKey(Pair<Operator<?, ?>, Operator<?, ?>> d) {
-      return materializedOutputs.containsKey(d);
-    }
-    void add(Operator<?, ?> source, Operator<?, ?> target,
+    // all inputs crated in this context
+    List<PartitionObservableStream> inputs = new ArrayList<>();
+
+    void add(
+        Dataset<?> dataset,
         InputProvider partitions) {
-      Pair<Operator<?, ?>, Operator<?, ?>> edge = Pair.of(source, target);
-      if (containsKey(edge)) {
-        throw new IllegalArgumentException("Dataset for edge "
-            + edge + " is already materialized!");
+
+      if (materializedOutputs.containsKey(dataset)) {
+        throw new IllegalArgumentException("Dataset "
+            + dataset + " is already materialized!");
       }
-      materializedOutputs.put(edge, partitions);
+      materializedOutputs.put(dataset, partitions);
     }
-    InputProvider get(Operator<?, ?> source, Operator<?, ?> target) {
-      Pair<Operator<?, ?>, Operator<?, ?>> edge = Pair.of(source, target);
-      InputProvider sup = materializedOutputs.get(edge);
+
+    InputProvider get(Dataset<?> dataset) {
+      InputProvider sup = materializedOutputs.get(dataset);
       if (sup == null) {
         throw new IllegalArgumentException(String.format(
-            "Do not have suppliers for edge %s -> %s (original producer %s )",
-            source, target, source.output().getProducer()));
+            "Do not have materiazed dataset for %s (original producer %s )",
+            dataset, dataset.getProducer()));
       }
       return sup;
     }
+
     void markRunning(Operator<?, ?> operator) {
       if (!this.runningOperators.add(operator)) {
         throw new IllegalStateException("Twice running the same operator?");
       }
     }
+
     boolean isRunning(Operator<?, ?> operator) {
       return runningOperators.contains(operator);
     }
+
+    PartitionObservableStream createStream(
+        java.util.concurrent.Executor executor,
+        Partition partition) {
+
+      PartitionObservableStream ret;
+      ret = new PartitionObservableStream(executor, partition);
+      inputs.add(ret);
+      return ret;
+    }
+
   }
 
   private final BlockingQueue<Runnable> queue = new SynchronousQueue<>(false);
@@ -324,7 +357,7 @@ public class InMemExecutor implements Executor {
     // transform the given flow to DAG of basic operators
     DAG<Operator<?, ?>> dag = FlowUnfolder.unfold(flow, Executor.getBasicOps());
 
-    final List<Future> runningTasks = new ArrayList<>();
+    final List<CountDownLatch> latches = new ArrayList<>();
     Collection<Node<Operator<?, ?>>> leafs = dag.getLeafs();
 
     List<ExecUnit> units = ExecUnit.split(dag);
@@ -338,7 +371,8 @@ public class InMemExecutor implements Executor {
 
       execUnit(unit, context);
     
-      runningTasks.addAll(consumeOutputs(unit.getLeafs(), context));
+      latches.add(consumeOutputs(unit.getLeafs(), context));
+      context.inputs.forEach(i -> i.startObserving());
     }
 
     // extract all processed sinks
@@ -348,21 +382,11 @@ public class InMemExecutor implements Executor {
             .collect(Collectors.toList());
 
     // wait for all threads to finish
-    for (Future<?> f : runningTasks) {
+    for (CountDownLatch latch : latches) {
       try {
-        f.get();
+        latch.await();
       } catch (InterruptedException e) {
         break;
-      } catch (ExecutionException e) {
-        // when any one of the tasks fails rollback all sinks and fail
-        for (DataSink<?> s : sinks) {
-          try {
-            s.rollback();
-          } catch (Exception ex) {
-            LOG.error("Exception during DataSink rollback", ex);
-          }
-        }
-        throw new RuntimeException(e);
       }
     }
 
@@ -380,54 +404,65 @@ public class InMemExecutor implements Executor {
 
   /** Read all outputs of given nodes and store them using their sinks. */
   @SuppressWarnings("unchecked")
-  private List<Future<?>> consumeOutputs(
+  private CountDownLatch consumeOutputs(
       Collection<Node<Operator<?, ?>>> leafs,
       ExecutionContext context) {
     
-    List<Future<?>> tasks = new ArrayList<>();
+    // count the consumers
+    int consumers = (int) leafs.stream()
+        .flatMap(l -> context.get(l.get().output()).stream())
+        .count();
+    CountDownLatch ret = new CountDownLatch(consumers);
+
     // consume outputs
     for (Node<Operator<?, ?>> output : leafs) {
       DataSink<?> sink = output.get().output().getOutputSink();
       sink.initialize();
-      final InputProvider provider = context.get(output.get(), null);
+      final InputProvider provider = context.get(output.get().output());
       int part = 0;
-      for (Supplier s : provider) {
+      for (ObservableStream<Datum> s : provider) {
         final Writer writer = sink.openWriter(part++);
-        tasks.add(executor.submit(() -> {
-          try {
-            for (;;) {
-              Datum datum = s.get();
-              if (datum.isEndOfStream()) {
-                // end of the stream
-                writer.flush();
-                writer.commit();
-                writer.close();
-                // and terminate the thread
-                break;
-              } else if (datum.isElement()) {
-                // ~ unwrap the bare bone element
-                writer.write(datum.getElement());
-              }
-            }
-          } catch (IOException ex) {
-            rollbackWriterUnchecked(writer);
-            // propagate exception
-            throw new RuntimeException(ex);
-          } catch (InterruptedException ex) {
-            rollbackWriterUnchecked(writer);
-          } finally {
+        s.observe(new StreamObserver<Datum>() {
+          @Override
+          public void onNext(Datum elem) {
             try {
-              writer.close();
-            } catch (IOException ioex) {
-              LOG.warn("Something went wrong", ioex);
-              // swallow exception
+              if (elem.isElement()) {
+                // ~ unwrap the bare bone element
+                writer.write(elem.getElement());
+              }
+            } catch (IOException ex) {
+              LOG.error("Failed to write element to output", ex);
+              throw new RuntimeException(ex);
             }
           }
-        }));
+
+          @Override
+          public void onError(Throwable err) {
+            LOG.error("Failed to consume outputs", err);
+            rollbackWriterUnchecked(writer);
+            ret.countDown();
+          }
+
+          @Override
+          public void onCompleted() {
+            try {
+              // end of the stream
+              writer.flush();
+              writer.commit();
+              writer.close();
+              ret.countDown();
+            } catch (IOException ex) {
+              throw new RuntimeException(ex);
+            }
+          }
+
+        });
+
       }
     }
-    return tasks;
-  }
+    return ret;
+  } 
+
 
   // rollback writer and do not throw checked exceptions
   private void rollbackWriterUnchecked(Writer writer) {
@@ -438,11 +473,15 @@ public class InMemExecutor implements Executor {
     }
   }
 
-  private InputProvider createStream(DataSource<?> source) {
+  private InputProvider createStream(
+      ExecutionContext context,
+      DataSource<?> source) {
+
     InputProvider ret = new InputProvider();
 
-    source.getPartitions().stream()
-        .map(PartitionSupplierStream::new)
+    source.getPartitions()
+        .stream()
+        .map(p -> context.createStream(executor, p))
         .forEach(ret::add);
 
     return ret;
@@ -465,149 +504,87 @@ public class InMemExecutor implements Executor {
       return;
     }
     if (op instanceof InputOperator) {
-      output = createStream(op.output().getSource());
+      output = createStream(context, op.output().getSource());
     } else if (op instanceof FlatMap) {
-      output = execMap((Node) node, context);
+      output = execMap(node, context);
     } else if (op instanceof Repartition) {
-      output = execRepartition((Node) node, context);
+      output = execRepartition(node, context);
     } else if (op instanceof ReduceStateByKey) {
-      output = execReduceStateByKey((Node) node, context);
+      output = execReduceStateByKey(node, context);
     } else if (op instanceof Union) {
-      output = execUnion((Node) node, context);
+      output = execUnion(node, context);
     } else {
       throw new IllegalStateException("Invalid operator: " + op);
     }
     context.markRunning(op);
-    // store output for each child
-    if (node.getChildren().size() > 1) {
-      List<List<BlockingQueue<?>>> forkedProviders = new ArrayList<>();
-      for (Node<Operator<?, ?>> ch : node.getChildren()) {
-        List<BlockingQueue<?>> forkedProviderQueue = new ArrayList<>();
-        InputProvider forkedProvider = new InputProvider();
-        forkedProviders.add(forkedProviderQueue);
-        for (int p = 0; p < output.size(); p++) {
-          BlockingQueue<Datum> queue = new ArrayBlockingQueue<>(5000);
-          forkedProviderQueue.add(queue);
-          forkedProvider.add((Supplier) QueueSupplier.wrap(queue));
-        }
-        context.add(node.get(), ch.get(), forkedProvider);
-      }
-      for (int p = 0; p < output.size(); p++) {
-        int partId = p;
-        Supplier partSup = output.get(p);
-        List<BlockingQueue<?>> outputs = forkedProviders.stream()
-            .map(l -> l.get(partId)).collect(Collectors.toList());
-        executor.execute(() -> {
-          // copy the original data to all queues
-          for (;;) {
-            try {
-              Datum item = partSup.get();
-              for (BlockingQueue ch : outputs) {
-                try {
-                  ch.put(item);
-                } catch (InterruptedException ex) {
-                  Thread.currentThread().interrupt();
-                }
-              }
-              if (item.isEndOfStream()) {
-                return;
-              }
-            } catch (InterruptedException ex) {
-              Thread.currentThread().interrupt();
-              break;
-            }
-          }
-        });
-
-      }
-
-    } else if (node.getChildren().size() == 1) {
-      context.add(node.get(), node.getChildren().iterator().next().get(), output);
-    } else {
-      context.add(node.get(), null, output);
-    }
+    context.add(node.get().output(), output);
   }
 
   @SuppressWarnings("unchecked")
-  private InputProvider execMap(Node<FlatMap> flatMap,
+  private InputProvider execMap(
+      Node<Operator<?, ?>> flatMap,
       ExecutionContext context) {
-    InputProvider suppliers = context.get(
-        flatMap.getSingleParentOrNull().get(), flatMap.get());
+    FlatMap op = (FlatMap) flatMap.get();
+    InputProvider input = context.get(
+        flatMap.getSingleParent().get().output());
     InputProvider ret = new InputProvider();
-    final UnaryFunctor mapper = flatMap.get().getFunctor();
-    for (Supplier s : suppliers) {
-      final BlockingQueue<Datum> out = new ArrayBlockingQueue(5000);
-      ret.add(QueueSupplier.wrap(out));
-      executor.execute(() -> {
-        Collector collector = QueueCollector.wrap(out);
-        for (;;) {
-          try {
-            // read input
-            Datum item = s.get();
-            WindowedElementCollector outC = new WindowedElementCollector(
-                collector, item::getTimestamp);
-            if (item.isElement()) {
-              // transform
-              outC.setWindow(item.getWindow());
-              mapper.apply(item.getElement(), outC);
-            } else {
-              out.put(item);
-              if (item.isEndOfStream()) {
-                break;
-              }
-            }
-          } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            break;
-          }
-        }
-      });
+    final UnaryFunctor mapper = op.getFunctor();
+    for (ObservableStream s : input) {
+      final BlockingQueue<Datum> out = new ArrayBlockingQueue<>(5000);
+      final BlockingQueueOutputWriter<Datum> output;
+      output = BlockingQueueOutputWriter.wrap(out);
+      new FlatMapper(op.getName(), s,
+          (OutputWriter) output, mapper,
+          Datum.Factory.INSTANCE).run();
+      ret.add(BlockingQueueStreamObservable.wrap(executor, out));
     }
     return ret;
   }
 
   @SuppressWarnings("unchecked")
   private InputProvider execRepartition(
-      Node<Repartition> repartition,
+      Node<Operator<?, ?>> repartition,
       ExecutionContext context) {
 
-    Partitioning partitioning = repartition.get().getPartitioning();
+    Repartition op = (Repartition) repartition.get();
+    Partitioning partitioning = op.getPartitioning();
     int numPartitions = partitioning.getNumPartitions();
     InputProvider input = context.get(
-        repartition.getSingleParentOrNull().get(), repartition.get());
+        repartition.getSingleParent().get().output());
     if (numPartitions <= 0) {
       throw new IllegalArgumentException("Cannot repartition input to "
           + numPartitions + " partitions");
     }
 
     List<BlockingQueue<Datum>> outputQueues = repartitionSuppliers(
+        op.getName(),
         input, e -> e, partitioning, Optional.empty(), Optional.empty());
 
     InputProvider ret = new InputProvider();
     outputQueues.stream()
-        .map(QueueSupplier::new)
-        .forEach(s -> ret.add((Supplier) s));
+        .map(q -> BlockingQueueStreamObservable.wrap(executor, q))
+        .forEach(s -> ret.add(s));
     return ret;
   }
 
   @SuppressWarnings("unchecked")
   private InputProvider execReduceStateByKey(
-      Node<ReduceStateByKey> reduceStateByKeyNode,
+      Node<Operator<?, ?>> node,
       ExecutionContext context) {
 
-    final ReduceStateByKey reduceStateByKey = reduceStateByKeyNode.get();
+    final ReduceStateByKey reduceStateByKey = (ReduceStateByKey) node.get();
     final UnaryFunction keyExtractor = reduceStateByKey.getKeyExtractor();
     final UnaryFunction valueExtractor = reduceStateByKey.getValueExtractor();
 
     InputProvider suppliers = context.get(
-        reduceStateByKeyNode.getSingleParentOrNull().get(),
-        reduceStateByKeyNode.get());
+        node.getSingleParent().get().output());
 
     final Partitioning partitioning = reduceStateByKey.getPartitioning();
     final Windowing windowing = reduceStateByKey.getWindowing();
     final ExtractEventTime eventTimeAssigner = reduceStateByKey.getEventTimeAssigner();
 
     List<BlockingQueue<Datum>> repartitioned = repartitionSuppliers(
+        reduceStateByKey.getName(),
         suppliers, keyExtractor, partitioning,
         Optional.ofNullable(windowing), Optional.ofNullable(eventTimeAssigner));
 
@@ -621,7 +598,7 @@ public class InMemExecutor implements Executor {
     int i = 0;
     for (BlockingQueue<Datum> q : repartitioned) {
       final BlockingQueue<Datum> output = new ArrayBlockingQueue<>(5000);
-      outputSuppliers.add(QueueSupplier.wrap(output));
+      outputSuppliers.add(BlockingQueueStreamObservable.wrap(executor, output));
       new ReduceStateByKeyReducer(
           reduceStateByKey,
           reduceStateByKey.getName() + "#part-" + (i++),
@@ -636,13 +613,15 @@ public class InMemExecutor implements Executor {
                   ? triggerSchedulerSupplier.get()
                   : new WatermarkTriggerScheduler(watermarkDuration)),
           watermarkEmitStrategySupplier.get(),
-          storageProvider).run();
+          storageProvider,
+          Datum.Factory.INSTANCE).run();
     }
     return outputSuppliers;
   }
 
   @SuppressWarnings("unchecked")
   private List<BlockingQueue<Datum>> repartitionSuppliers(
+      String name,
       InputProvider suppliers,
       final UnaryFunction keyExtractor,
       final Partitioning partitioning,
@@ -680,7 +659,7 @@ public class InMemExecutor implements Executor {
     }
 
     int i = 0;
-    for (Supplier s : suppliers) {
+    for (ObservableStream<Datum> s : suppliers) {
       final int readerId = i++;
       // each input partition maintains maximum element's timestamp that
       // passed through it
@@ -690,60 +669,63 @@ public class InMemExecutor implements Executor {
             Datum.watermark(maxElementTimestamp.get()),
             ret, readerId, clocks, true);
       };
-      if (emitStrategies != null) {
-        emitStrategies[readerId].schedule(emitWatermark);
-      }
-      executor.execute(() -> {
-        try {
-          for (;;) {
-            // read input
-            Datum datum = s.get();
-            
-            if (datum.isEndOfStream()) {
-              break;
-            }
+      emitStrategies[readerId].schedule(emitWatermark);
+      s.observe(new StreamObserver<Datum>() {        
+        @Override
+        public void onNext(Datum elem) {
+          if (eventTimeAssigner.isPresent() && elem.isElement()) {
+            ExtractEventTime assigner = eventTimeAssigner.get();
+            elem.setTimestamp(assigner.extractTimestamp(elem.getElement()));
+          }
 
-            if (eventTimeAssigner.isPresent() && datum.isElement()) {
-              ExtractEventTime assigner = eventTimeAssigner.get();
-              datum.setTimestamp(assigner.extractTimestamp(datum.getElement()));
-            }
+          if (!handleMetaData(elem, ret, readerId, clocks, !hasTimeAssignment)) {
 
-            if (!handleMetaData(datum, ret, readerId, clocks, !hasTimeAssignment)) {
-
-              // extract element's timestamp if available
-              long elementStamp = datum.getTimestamp();
-              maxElementTimestamp.accumulateAndGet(elementStamp,
-                  (oldVal, newVal) -> oldVal < newVal ? newVal : oldVal);
-              // determine partition
-              Object key = keyExtractor.apply(datum.getElement());
-              final Iterable<Window> targetWindows;
-              int windowShift = 0;
-              if (allowWindowBasedShuffling) {
-                if (windowing.isPresent()) {
-                  // FIXME: the time function inside windowing
-                  // must be part of the operator itself
-                  targetWindows = windowing.get().assignWindowsToElement(datum);
-                } else {
-                  targetWindows = Collections.singleton(datum.getWindow());
-                }
-
-                if (!isMergingWindowing && Iterables.size(targetWindows) == 1) {
-                  windowShift = new Random(
-                      Iterables.getOnlyElement(targetWindows).hashCode()).nextInt();
-                }
+            // extract element's timestamp if available
+            long elementStamp = elem.getTimestamp();
+            maxElementTimestamp.accumulateAndGet(elementStamp,
+                (oldVal, newVal) -> oldVal < newVal ? newVal : oldVal);
+            // determine partition
+            Object key = keyExtractor.apply(elem.getElement());
+            final Iterable<Window> targetWindows;
+            int windowShift = 0;
+            if (allowWindowBasedShuffling) {
+              if (windowing.isPresent()) {
+                // FIXME: the time function inside windowing
+                // must be part of the operator itself
+                targetWindows = windowing.get().assignWindowsToElement(elem);
+              } else {
+                targetWindows = Collections.singleton(elem.getWindow());
               }
-              int partition
-                  = ((partitioning.getPartitioner().getPartition(key) + windowShift)
-                      & Integer.MAX_VALUE) % outputPartitions;
+
+              if (!isMergingWindowing && Iterables.size(targetWindows) == 1) {
+                windowShift = new Random(
+                    Iterables.getOnlyElement(targetWindows).hashCode()).nextInt();
+              }
+            }
+            int partition
+                = ((partitioning.getPartitioner().getPartition(key) + windowShift)
+                    & Integer.MAX_VALUE) % outputPartitions;
+            try {
               // write to the correct partition
-              ret.get(partition).put(datum);
+              ret.get(partition).put(elem);
+            } catch (InterruptedException ex) {
+              LOG.warn("Interrupted while writing to output queue", ex);
+              Thread.currentThread().interrupt();
             }
           }
-        } catch (InterruptedException ex) {
-          Thread.currentThread().interrupt();
-        } finally {
+        }
+
+        @Override
+        public void onError(Throwable err) {
+          LOG.error("Error observing input stream of opeartor {}", name, err);
           workers.countDown();
         }
+
+        @Override
+        public void onCompleted() {
+          workers.countDown();
+        }
+
       });
     }
     waitForStreamEnds(workers, ret);
@@ -774,12 +756,12 @@ public class InMemExecutor implements Executor {
 
   @SuppressWarnings("unchecked")
   private InputProvider execUnion(
-      Node<Union> union, ExecutionContext context) {
+      Node<Operator<?, ?>> union, ExecutionContext context) {
 
     InputProvider ret = new InputProvider();
     union.getParents().stream()
-        .flatMap(p -> context.get(p.get(), union.get()).stream())
-        .forEach(s -> ret.add((Supplier) s));
+        .flatMap(p -> context.get(p.get().output()).stream())
+        .forEach(s -> ret.add(s));
     return ret;
   }
 

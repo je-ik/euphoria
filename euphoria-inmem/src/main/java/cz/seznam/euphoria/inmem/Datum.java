@@ -15,8 +15,9 @@
  */
 package cz.seznam.euphoria.inmem;
 
+import cz.seznam.euphoria.inmem.stream.StreamElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
-import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
+import cz.seznam.euphoria.inmem.stream.StreamElementFactory;
 
 /**
  * Object passed inside inmem processing pipelines.
@@ -25,7 +26,33 @@ import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
  *  * end-of-stream marks
  *  * watermarks
  */
-class Datum implements WindowedElement<Window, Object> {
+class Datum implements StreamElement<Object> {
+
+  static final class Factory implements StreamElementFactory<Object, Datum> {
+
+    static final Factory INSTANCE = new Factory();
+
+    @Override
+    public Datum endOfStream() {
+      return Datum.endOfStream();
+    }
+
+    @Override
+    public Datum watermark(long stamp) {
+      return Datum.watermark(stamp);
+    }
+
+    @Override
+    public Datum windowTrigger(Window window, long stamp) {
+      return Datum.windowTrigger(window, stamp);
+    }
+
+    @Override
+    public Datum data(Window window, long stamp, Object data) {
+      return Datum.of(window, data, stamp);
+    }
+
+  }
 
   private final Window window;
   private final Object element;
@@ -49,7 +76,7 @@ class Datum implements WindowedElement<Window, Object> {
     return new WindowTrigger(window, stamp);
   }
 
-  static class EndOfStream extends Datum {
+  private static class EndOfStream extends Datum {
     EndOfStream() {
       super(Long.MAX_VALUE);
     }
@@ -63,7 +90,7 @@ class Datum implements WindowedElement<Window, Object> {
     }
   }
 
-  static class Watermark extends Datum {
+  private static class Watermark extends Datum {
     Watermark(long stamp) {
       super(stamp);
     }
@@ -77,7 +104,7 @@ class Datum implements WindowedElement<Window, Object> {
     }
   }
 
-  static class WindowTrigger extends Datum {
+  private static class WindowTrigger extends Datum {
     @SuppressWarnings("unchecked")
     WindowTrigger(Window window, long stamp) {
       super(window, null, stamp);
@@ -122,21 +149,25 @@ class Datum implements WindowedElement<Window, Object> {
   }
 
   /** Is this regular element message? */
+  @Override
   public boolean isElement() {
     return getElement() != null;
   }
 
   /** Is this end-of-stream message? */
+  @Override
   public boolean isEndOfStream() {
     return false;
   }
 
   /** Is this watermark message? */
+  @Override
   public boolean isWatermark() {
     return false;
   }
 
   /** Is this window trigger event? */
+  @Override
   public boolean isWindowTrigger() {
     return false;
   }

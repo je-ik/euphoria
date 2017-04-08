@@ -23,7 +23,7 @@ public final class KeyedWindow<W extends Window, K> {
   private final W window;
   private final K key;
 
-  KeyedWindow(W window, K key) {
+  public KeyedWindow(W window, K key) {
     this.window = Objects.requireNonNull(window);
     this.key = key;
   }

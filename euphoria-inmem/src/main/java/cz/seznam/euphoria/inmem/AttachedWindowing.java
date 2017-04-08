@@ -23,9 +23,9 @@ import cz.seznam.euphoria.core.client.triggers.Trigger;
 
 import java.util.Collections;
 
-class AttachedWindowing<T, W extends Window> implements Windowing<T, W> {
+public class AttachedWindowing<T, W extends Window> implements Windowing<T, W> {
 
-  static final AttachedWindowing INSTANCE = new AttachedWindowing();
+  public static final AttachedWindowing INSTANCE = new AttachedWindowing();
 
   @SuppressWarnings("unchecked")
   @Override

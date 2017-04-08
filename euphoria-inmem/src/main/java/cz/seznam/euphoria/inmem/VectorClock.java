@@ -20,7 +20,7 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * Vector clock implementation for inmem.
  */
-class VectorClock {
+public class VectorClock {
 
   final AtomicLong[] current;
 

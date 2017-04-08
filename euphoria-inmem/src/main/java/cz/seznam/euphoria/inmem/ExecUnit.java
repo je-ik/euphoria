@@ -33,7 +33,7 @@ import java.util.stream.Collectors;
  * some intermediate datasets. Datasets might be shared across multiple
  * {@code ExecUnit}s.
  */
-class ExecUnit {
+public class ExecUnit {
 
   /** All inputs to this exec unit. */
   final List<Dataset<?>> inputs = new ArrayList<>();

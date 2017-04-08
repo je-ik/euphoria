@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package cz.seznam.euphoria.inmem;
+package cz.seznam.euphoria.inmem.runnable;
 
 import cz.seznam.euphoria.inmem.stream.OutputWriter;
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
@@ -37,7 +37,16 @@ import cz.seznam.euphoria.core.client.operator.state.ValueStorageDescriptor;
 import cz.seznam.euphoria.core.client.triggers.Trigger;
 import cz.seznam.euphoria.core.client.triggers.TriggerContext;
 import cz.seznam.euphoria.core.client.util.Pair;
-import cz.seznam.euphoria.inmem.stream.StreamObservable;
+import cz.seznam.euphoria.inmem.AttachedWindowing;
+import cz.seznam.euphoria.inmem.Collector;
+import cz.seznam.euphoria.inmem.InMemExecutor;
+import cz.seznam.euphoria.inmem.KeyedWindow;
+import cz.seznam.euphoria.inmem.TriggerScheduler;
+import cz.seznam.euphoria.inmem.Triggerable;
+import cz.seznam.euphoria.inmem.WatermarkEmitStrategy;
+import cz.seznam.euphoria.inmem.WindowedElementCollector;
+import cz.seznam.euphoria.inmem.stream.StreamElement;
+import cz.seznam.euphoria.inmem.stream.StreamElementFactory;
 import cz.seznam.euphoria.inmem.stream.StreamObserver;
 import cz.seznam.euphoria.shaded.guava.com.google.common.base.Preconditions;
 import org.slf4j.Logger;
@@ -56,17 +65,24 @@ import java.util.function.Supplier;
 
 import static java.util.Objects.requireNonNull;
 import static java.util.stream.Collectors.toSet;
+import cz.seznam.euphoria.inmem.stream.ObservableStream;
 
-class ReduceStateByKeyReducer implements Runnable {
+public class ReduceStateByKeyReducer implements Runnable {
 
   private static final Logger LOG = LoggerFactory.getLogger(ReduceStateByKeyReducer.class);
 
   static final class KeyedElementCollector extends WindowedElementCollector<Object> {
     private final Object key;
 
-    KeyedElementCollector(Collector<Datum> wrap, Window window, Object key,
-        Supplier<Long> stampSupplier) {
-      super(wrap, stampSupplier);
+    @SuppressWarnings("unchecked")
+    KeyedElementCollector(
+        Collector<StreamElement<?>> wrap,
+        Window window,
+        Object key,
+        Supplier<Long> stampSupplier,
+        StreamElementFactory<Object, ?> elementFactory) {
+
+      super((Collector) wrap, stampSupplier, elementFactory);
       this.key = key;
       this.window = window;
     }
@@ -397,8 +413,8 @@ class ReduceStateByKeyReducer implements Runnable {
     final StorageProvider storageProvider;
     final WindowRegistry wRegistry = new WindowRegistry();
 
-    final Collector<Datum> stateOutput;
-    final OutputWriter<Datum> rawOutput;
+    final Collector<StreamElement<?>> stateOutput;
+    final OutputWriter<StreamElement<?>> rawOutput;
     final TriggerScheduler<Window, Object> triggering;
     final StateFactory<Object, State> stateFactory;
     final CombinableReduceFunction<State> stateCombiner;
@@ -409,7 +425,7 @@ class ReduceStateByKeyReducer implements Runnable {
     private Map<Window, Long> flushedWindows = new HashMap<>();
 
     private ProcessingState(
-        OutputWriter<Datum> output,
+        OutputWriter<StreamElement<?>> output,
         TriggerScheduler<Window, Object> triggering,
         StateFactory<Object, State> stateFactory,
         CombinableReduceFunction<State> stateCombiner,
@@ -435,7 +451,7 @@ class ReduceStateByKeyReducer implements Runnable {
 
     // ~ signal eos further down the output channel
     void closeOutput() throws InterruptedException {
-      this.rawOutput.write(Datum.endOfStream());
+      this.rawOutput.write(elementFactory.endOfStream());
     }
 
     /**
@@ -485,7 +501,8 @@ class ReduceStateByKeyReducer implements Runnable {
         state = stateFactory.apply(
                 new KeyedElementCollector(
                     stateOutput, kw.window(), kw.key(),
-                    processing.triggering::getCurrentTimestamp),
+                    processing.triggering::getCurrentTimestamp,
+                    elementFactory),
                 storageProvider);
         wRegistry.setWindowState(kw, state);
       }
@@ -506,7 +523,10 @@ class ReduceStateByKeyReducer implements Runnable {
     // ~ merges window states for sources and places it on 'target'
     // ~ returns a list of windows which were merged and actually removed
     Set<KeyedWindow<Window, Object>>
-    mergeWindowStates(Collection<Window> sources, KeyedWindow<Window, Object> target) {
+    mergeWindowStates(
+        Collection<Window> sources,
+        KeyedWindow<Window, Object> target) {
+      
       // ~ first find the states to be merged
       List<Pair<Window, State>> combine = new ArrayList<>(sources.size() + 1);
       for (Window source : sources) {
@@ -574,7 +594,7 @@ class ReduceStateByKeyReducer implements Runnable {
     void emitWatermark() {
       final long stamp = getCurrentWatermark();      
       try {
-        rawOutput.write(Datum.watermark(stamp));
+        rawOutput.write(elementFactory.watermark(stamp));
       } catch (InterruptedException ex) {
         LOG.warn("Interrupted while emitting watermark {}", stamp);
         Thread.currentThread().interrupt();
@@ -582,8 +602,8 @@ class ReduceStateByKeyReducer implements Runnable {
     }
   } // ~ end of ProcessingState
 
-  private final StreamObservable<Datum> input;
-  private final OutputWriter<Datum> output;
+  private final ObservableStream<? extends StreamElement<?>> input;
+  private final OutputWriter<StreamElement<?>> output;
 
   private final boolean isAttachedWindowing;
   private final Windowing windowing;
@@ -594,6 +614,8 @@ class ReduceStateByKeyReducer implements Runnable {
 
   private final Trigger<Window> trigger;
 
+  private final StreamElementFactory<Object, ?> elementFactory;
+
   // ~ both of these are guarded by "processing"
   private final ProcessingState processing;
   private final TriggerScheduler<Window, Object> scheduler;
@@ -601,19 +623,21 @@ class ReduceStateByKeyReducer implements Runnable {
   private long currentElementTime;
 
   @SuppressWarnings("unchecked")
-  ReduceStateByKeyReducer(ReduceStateByKey operator,
-                          String name,
-                          StreamObservable<Datum> input,
-                          OutputWriter<Datum> output,
-                          UnaryFunction keyExtractor,
-                          UnaryFunction valueExtractor,
-                          TriggerScheduler scheduler,
-                          WatermarkEmitStrategy watermarkStrategy,
-                          StorageProvider storageProvider) {
+  public <D extends StreamElement<Object>> ReduceStateByKeyReducer(
+      ReduceStateByKey operator,
+      String name,
+      ObservableStream<D> input,
+      OutputWriter<D> output,
+      UnaryFunction keyExtractor,
+      UnaryFunction valueExtractor,
+      TriggerScheduler scheduler,
+      WatermarkEmitStrategy watermarkStrategy,
+      StorageProvider storageProvider,
+      StreamElementFactory<Object, D> elementFactory) {
 
     this.name = requireNonNull(name);
     this.input = requireNonNull(input);
-    this.output = requireNonNull(output);
+    this.output = (OutputWriter) requireNonNull(output);
     this.isAttachedWindowing = operator.getWindowing() == null;
     this.windowing = isAttachedWindowing
         ? AttachedWindowing.INSTANCE : operator.getWindowing();
@@ -623,10 +647,11 @@ class ReduceStateByKeyReducer implements Runnable {
     this.trigger = requireNonNull(windowing.getTrigger());
     this.scheduler = requireNonNull(scheduler);
     this.processing = new ProcessingState(
-        output, scheduler,
+        this.output, scheduler,
         requireNonNull(operator.getStateFactory()),
         requireNonNull(operator.getStateCombiner()),
         storageProvider);
+    this.elementFactory = Objects.requireNonNull(elementFactory);
   }
 
   <W extends Window, K> Triggerable<W, K> guardTriggerable(Triggerable<W, K> t) {
@@ -673,25 +698,24 @@ class ReduceStateByKeyReducer implements Runnable {
     }
   }
 
+  @SuppressWarnings("unchecked")
   @Override
   public void run() {
     LOG.debug("Started ReduceStateByKeyReducer for operator {}", name);
     watermarkStrategy.schedule(processing::emitWatermark);
-    input.observe(new StreamObserver<Datum>() {
+    input.observe((StreamObserver) new StreamObserver<StreamElement<?>>() {
       @Override
-      public void onNext(Datum elem) {
+      public void onNext(StreamElement<?> elem) {
         synchronized (processing) {
           try {
             if (elem.isElement()) {
               currentElementTime = elem.getTimestamp();
               processing.stats.update(currentElementTime);
               processInput(elem);
-            } else if (elem.isEndOfStream()) {
-              processEndOfStream((Datum.EndOfStream) elem);
             } else if (elem.isWatermark()) {
-              processWatermark((Datum.Watermark) elem);
+              processWatermark(elem);
             } else if (elem.isWindowTrigger()) {
-              processWindowTrigger((Datum.WindowTrigger) elem);
+              processWindowTrigger(elem);
             }
             // ~ send pending notifications about flushed windows
             notifyFlushedWindows();
@@ -713,7 +737,12 @@ class ReduceStateByKeyReducer implements Runnable {
 
       @Override
       public void onCompleted() {
-        
+        try {
+          processEndOfStream();
+          output.write(elementFactory.endOfStream());
+        } catch (InterruptedException ex) {
+          Thread.currentThread().interrupt();
+        }
       }
       
     });
@@ -723,13 +752,13 @@ class ReduceStateByKeyReducer implements Runnable {
     // ~ send notifications to downstream operators about flushed windows
     long max = 0;
     for (Map.Entry<Window, Long> w : processing.takeFlushedWindows().entrySet()) {
-      output.write(Datum.windowTrigger(w.getKey(), w.getValue()));
+      output.write(elementFactory.windowTrigger(w.getKey(), w.getValue()));
       long flushTime = w.getValue();
       if (flushTime > max) {
         max = flushTime;
       }
     }
-    output.write(Datum.watermark(max));
+    output.write(elementFactory.watermark(max));
   }
 
   private void processInput(WindowedElement element) {
@@ -817,13 +846,13 @@ class ReduceStateByKeyReducer implements Runnable {
     }
   }
 
-  private void processWatermark(Datum.Watermark watermark) {
+  private void processWatermark(StreamElement watermark) {
     // update current stamp
     long stamp = watermark.getTimestamp();
     processing.updateStamp(stamp);
   }
 
-  private void processWindowTrigger(Datum.WindowTrigger trigger) {
+  private void processWindowTrigger(StreamElement trigger) {
     if (isAttachedWindowing) {
       // reregister trigger of given window
       // FIXME: move this to windowing itself so that attached windowing
@@ -832,7 +861,7 @@ class ReduceStateByKeyReducer implements Runnable {
     }
   }
 
-  private void processEndOfStream(Datum.EndOfStream eos) throws InterruptedException {
+  private void processEndOfStream() throws InterruptedException {
     // ~ flush all registered triggers
     scheduler.updateStamp(Long.MAX_VALUE);
     // ~ stop triggers - there actually should be none left
@@ -840,7 +869,6 @@ class ReduceStateByKeyReducer implements Runnable {
     // close all states
     processing.flushAndCloseAllWindows();
     processing.closeOutput();
-    output.write(eos);
   }
 
   // retrieve current watermark stamp

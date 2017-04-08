@@ -85,6 +85,7 @@
     <module>euphoria-fluent</module>
     <module>euphoria-inmem</module>
     <module>euphoria-kafka</module>
+    <module>euphoria-kafka-executor</module>
     <module>euphoria-hadoop</module>
     <module>euphoria-operator-testkit</module>
     <module>euphoria-flink</module>
@@ -406,7 +407,7 @@
             <groupId>com.mycila</groupId>
             <artifactId>license-maven-plugin</artifactId>
             <configuration>
-              <header>${license-header.txt</header>
+              <header>${license-header.txt}</header>
               <properties>
                 <owner>Seznam.cz, a.s.</owner>
               </properties>
@@ -496,6 +497,12 @@
       <dependency>
         <groupId>cz.seznam.euphoria</groupId>
         <artifactId>euphoria-kafka_0.10</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>cz.seznam.euphoria</groupId>
+        <artifactId>euphoria-kafka-executor</artifactId>
         <version>${project.version}</version>
       </dependency>
 

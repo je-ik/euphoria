@@ -730,7 +730,9 @@ public class InMemExecutorTest {
   }
 
   @Test
-  public void testWatermarkSchedulerWithLatecomers() throws InterruptedException, ExecutionException {
+  public void testWatermarkSchedulerWithLatecomers()
+      throws InterruptedException, ExecutionException {
+    
     int N = 2000;
 
     // generate some small ints, use them as event time and count them
