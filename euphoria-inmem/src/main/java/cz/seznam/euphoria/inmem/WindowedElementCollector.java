@@ -21,8 +21,13 @@ import cz.seznam.euphoria.core.client.io.Context;
 
 import java.util.Objects;
 import java.util.function.Supplier;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 class WindowedElementCollector<T> implements Context<T> {
+
+  private static final Logger LOG = LoggerFactory.getLogger(WindowedElementCollector.class);
+
   private final Collector<Datum> wrap;
   private final Supplier<Long> stampSupplier;
 
@@ -44,7 +49,12 @@ class WindowedElementCollector<T> implements Context<T> {
             ? ((TimedWindow) window).maxTimestamp()
             : stampSupplier.get();
 
-    wrap.collect(Datum.of(window, elem, stamp));
+    try {
+      wrap.collect(Datum.of(window, elem, stamp));
+    } catch (InterruptedException ex) {
+      LOG.warn("Interrupted while collecting element {}", elem);
+      Thread.currentThread().interrupt();
+    }
   }
 
   void setWindow(Window window) {

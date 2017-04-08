@@ -41,6 +41,9 @@ import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.core.executor.Executor;
 import cz.seznam.euphoria.core.executor.FlowUnfolder;
 import cz.seznam.euphoria.core.executor.FlowUnfolder.InputOperator;
+import cz.seznam.euphoria.inmem.stream.BlockingQueueOutputWriter;
+import cz.seznam.euphoria.inmem.stream.BlockingQueueStreamObservable;
+import cz.seznam.euphoria.inmem.stream.OutputWriter;
 import cz.seznam.euphoria.shaded.guava.com.google.common.collect.Iterables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -150,19 +153,18 @@ public class InMemExecutor implements Executor {
 
   static class QueueCollector implements Collector<Datum> {
     static QueueCollector wrap(BlockingQueue<Datum> queue) {
-      return new QueueCollector(queue);
+      return new QueueCollector(BlockingQueueOutputWriter.wrap(queue));
     }
-    private final BlockingQueue<Datum> queue;
-    QueueCollector(BlockingQueue<Datum> queue) {
-      this.queue = queue;
+    static QueueCollector wrap(OutputWriter<Datum> writer) {
+      return new QueueCollector(writer);
+    }
+    private final OutputWriter<Datum> writer;
+    QueueCollector(OutputWriter<Datum> writer) {
+      this.writer = writer;
     }
     @Override
-    public void collect(Datum elem) {
-      try {
-        queue.put(elem);
-      } catch (InterruptedException ex) {
-        throw new RuntimeException(ex);
-      }
+    public void collect(Datum elem) throws InterruptedException {
+      writer.write(elem);
     }
   }
 
@@ -620,10 +622,12 @@ public class InMemExecutor implements Executor {
     for (BlockingQueue<Datum> q : repartitioned) {
       final BlockingQueue<Datum> output = new ArrayBlockingQueue<>(5000);
       outputSuppliers.add(QueueSupplier.wrap(output));
-      executor.execute(new ReduceStateByKeyReducer(
+      new ReduceStateByKeyReducer(
           reduceStateByKey,
           reduceStateByKey.getName() + "#part-" + (i++),
-          q, output, keyExtractor, valueExtractor,
+          BlockingQueueStreamObservable.wrap(executor, q),
+          BlockingQueueOutputWriter.wrap(output),
+          keyExtractor, valueExtractor,
           // ~ on batch input we use a noop trigger scheduler
           // ~ if using attached windowing, we have to use watermark triggering
           reduceStateByKey.input().isBounded()
@@ -632,7 +636,7 @@ public class InMemExecutor implements Executor {
                   ? triggerSchedulerSupplier.get()
                   : new WatermarkTriggerScheduler(watermarkDuration)),
           watermarkEmitStrategySupplier.get(),
-          storageProvider));
+          storageProvider).run();
     }
     return outputSuppliers;
   }
