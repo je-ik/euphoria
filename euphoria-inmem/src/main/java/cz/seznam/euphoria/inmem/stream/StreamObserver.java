@@ -16,16 +16,26 @@
 
 package cz.seznam.euphoria.inmem.stream;
 
+import java.util.List;
+
 /**
  * Observer of stream flowing between operators.
  */
 public interface StreamObserver<T> {
 
   /**
+   * Notify about partition assignment has changed.
+   * This will be called before first call to {@code onNext} and
+   * then every time the assignment changes.
+   */
+  void onAssign(List<Integer> partitions);
+
+  /**
    * Observe next element.
+   * @param partition ID of partition (zero-based) that the element comes from
    * @param elem the new element read from the stream
    */
-  void onNext(T elem);
+  void onNext(int partition, T elem);
 
   /**
    * Error occurred while observing the stream. This implies that no more {@code onNext}.

@@ -49,13 +49,14 @@ public class JoinOperatorTest {
   }
 
   @SuppressWarnings("unchecked")
-  private void testJoin(boolean outer,
-                        Windowing windowing,
-                        Duration readDelay,
-                        List<String> leftInput,
-                        List<String> rightInput,
-                        List<String> expectedOutput,
-                        boolean makeOneArmLonger)
+  private void testJoin(
+      boolean outer,
+      Windowing windowing,
+      Duration readDelay,
+      List<String> leftInput,
+      List<String> rightInput,
+      List<String> expectedOutput,
+      boolean makeOneArmLonger)
       throws Exception
   {
     Flow flow = Flow.create("Test");

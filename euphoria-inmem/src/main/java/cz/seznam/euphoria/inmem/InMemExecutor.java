@@ -139,13 +139,11 @@ public class InMemExecutor implements Executor {
             if (elem.isEndOfStream()) {
               break;
             }
-            System.err.println(" ** next " + elem);
             synchronized (observers) {
               observers.forEach(o -> o.onNext(elem));
             }
           }
           synchronized (observers) {
-            System.err.println("' *** completed ");
             observers.forEach(o -> o.onCompleted());
           }
         } catch (Throwable err) {

@@ -36,20 +36,21 @@ public class BlockingQueueStreamObservable<T extends StreamElement<?>>
    */
   public static <T extends StreamElement<?>> BlockingQueueStreamObservable<T> wrap(
       Executor executor,
-      BlockingQueue<T> queue) {
+      List<BlockingQueue<T>> queues) {
 
-    return new BlockingQueueStreamObservable<>(executor, queue);
+    return new BlockingQueueStreamObservable<>(executor, queues);
   }
 
   private final Executor executor;
-  private final BlockingQueue<T> queue;
+  private final List<BlockingQueue<T>> queues;
   private final List<StreamObserver<T>> observers = new ArrayList<>();
 
   private BlockingQueueStreamObservable(
-      Executor executor, BlockingQueue<T> queue) {
+      Executor executor,
+      List<BlockingQueue<T>> queues) {
 
     this.executor = executor;
-    this.queue = queue;
+    this.queues = queues;
   }
 
   @Override

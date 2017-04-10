@@ -21,8 +21,12 @@ import java.util.UUID;
 /**
  * A stream that can be observed by observers.
  */
-@FunctionalInterface
 public interface ObservableStream<T> {
+
+  /**
+   * Total number of partitions.
+   */
+  int size();
 
   /**
    * Start observing the stream with named observer.
