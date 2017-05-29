@@ -374,13 +374,6 @@ public class KafkaExecutor implements Executor {
         clock.set(new VectorClock(numPartitions));
         awaitLatch(latch);
         // send downstream command to reset the state
-        /* for (BlockingQueue<KafkaStreamElement> out : outputQueues) {
-          try {
-            out.put(KafkaStreamElement.FACTORY.rewindStateToCommitted());
-          } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-          }
-        } */
         LOG.info(
             "Started receiving part of operator {} with {} assigned partitions",
             op.getName(),
