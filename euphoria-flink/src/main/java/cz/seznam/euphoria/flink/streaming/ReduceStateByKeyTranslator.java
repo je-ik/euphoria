@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,12 +16,11 @@
 package cz.seznam.euphoria.flink.streaming;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
-import cz.seznam.euphoria.core.client.functional.CombinableReduceFunction;
-import cz.seznam.euphoria.core.client.functional.StateFactory;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
-import cz.seznam.euphoria.core.client.operator.ExtractEventTime;
 import cz.seznam.euphoria.core.client.operator.ReduceStateByKey;
 import cz.seznam.euphoria.core.client.operator.state.State;
+import cz.seznam.euphoria.core.client.operator.state.StateFactory;
+import cz.seznam.euphoria.core.client.operator.state.StateMerger;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.core.util.Settings;
 import cz.seznam.euphoria.flink.FlinkOperator;
@@ -36,13 +35,11 @@ import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.functions.timestamps.BoundedOutOfOrdernessTimestampExtractor;
 import org.apache.flink.streaming.api.operators.AbstractStreamOperator;
 import org.apache.flink.streaming.api.operators.ChainingStrategy;
 import org.apache.flink.streaming.api.operators.OneInputStreamOperator;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
-import java.time.Duration;
 import java.util.Objects;
 
 class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceStateByKey> {
@@ -53,14 +50,20 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
   static final String CFG_DESCRIPTORS_CACHE_SIZE_MAX_KEY = "euphoria.flink.streaming.descriptors.cache.max.size";
   static final int CFG_DESCRIPTORS_CACHE_MAX_SIZE_DEFAULT = 1000;
 
+  static final String CFG_ALLOW_EARLY_EMITTING_KEY = "euphoria.flink.streaming.allow.early.emitting";
+  static final boolean CFG_ALLOW_EARLY_EMITTING_DEFAULT = false;
+
   private boolean valueOfAfterShuffle;
+  private boolean allowEarlyEmitting;
   private int descriptorsCacheMaxSize;
 
-  public ReduceStateByKeyTranslator(Settings settings) {
+  private void loadSettings(Settings settings) {
     this.valueOfAfterShuffle =
             settings.getBoolean(CFG_VALUE_OF_AFTER_SHUFFLE_KEY, CFG_VALUE_OF_AFTER_SHUFFLE_DEFAULT);
     this.descriptorsCacheMaxSize =
             settings.getInt(CFG_DESCRIPTORS_CACHE_SIZE_MAX_KEY, CFG_DESCRIPTORS_CACHE_MAX_SIZE_DEFAULT);
+    this.allowEarlyEmitting =
+            settings.getBoolean(CFG_ALLOW_EARLY_EMITTING_KEY, CFG_ALLOW_EARLY_EMITTING_DEFAULT);
   }
 
   @Override
@@ -68,13 +71,15 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
   public DataStream<?> translate(FlinkOperator<ReduceStateByKey> operator,
                                  StreamingExecutorContext context)
   {
+    loadSettings(context.getSettings());
+
     DataStream input =
             Iterables.getOnlyElement(context.getInputStreams(operator));
 
     ReduceStateByKey origOperator = operator.getOriginalOperator();
 
-    StateFactory<?, State> stateFactory = origOperator.getStateFactory();
-    CombinableReduceFunction stateCombiner = origOperator.getStateCombiner();
+    StateFactory<?, ?, State<?, ?>> stateFactory = origOperator.getStateFactory();
+    StateMerger<?, ?, State<?, ?>> stateCombiner = origOperator.getStateMerger();
 
     Windowing windowing = origOperator.getWindowing();
     if (windowing == null) {
@@ -84,12 +89,6 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
 
     final UnaryFunction keyExtractor = origOperator.getKeyExtractor();
     final UnaryFunction valueExtractor = origOperator.getValueExtractor();
-    final ExtractEventTime eventTimeAssigner = origOperator.getEventTimeAssigner();
-
-    if (eventTimeAssigner != null) {
-      input = input.assignTimestampsAndWatermarks(
-              new EventTimeAssigner(context.getAllowedLateness(), eventTimeAssigner));
-    }
 
     DataStream<StreamingElement<?, Pair>> reduced;
     WindowAssigner elMapper =
@@ -99,7 +98,9 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
                      .transform(operator.getName(), TypeInformation.of(StreamingElement.class),
                                 new StreamingElementWindowOperator(
                                         elMapper, windowing, stateFactory, stateCombiner,
-                                        context.isLocalMode(), descriptorsCacheMaxSize))
+                                        context.isLocalMode(), descriptorsCacheMaxSize,
+                                        allowEarlyEmitting,
+                                        context.getAccumulatorFactory(), context.getSettings()))
                      .setParallelism(operator.getParallelism());
     } else {
       // assign windows
@@ -112,9 +113,12 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
               .setParallelism(input.getParallelism());
       reduced = (DataStream) windowed.keyBy(new KeyedMultiWindowedElementKeyExtractor())
               .transform(operator.getName(), TypeInformation.of(StreamingElement.class),
-                      new KeyedMultiWindowedElementWindowOperator<>(
+                      new KeyedMultiWindowedElementWindowOperator(
                               windowing, stateFactory, stateCombiner,
-                              context.isLocalMode(), descriptorsCacheMaxSize))
+                              context.isLocalMode(), descriptorsCacheMaxSize,
+                              allowEarlyEmitting,
+                              context.getAccumulatorFactory(),
+                              context.getSettings()))
               .setParallelism(operator.getParallelism());
     }
 
@@ -126,32 +130,10 @@ class ReduceStateByKeyTranslator implements StreamingOperatorTranslator<ReduceSt
     if (!origOperator.getPartitioning().hasDefaultPartitioner()) {
       reduced = reduced.partitionCustom(
               new PartitionerWrapper<>(origOperator.getPartitioning().getPartitioner()),
-              p -> p.getElement().getKey());
+              p -> p.getElement().getFirst());
     }
 
     return reduced;
-  }
-
-  private static class EventTimeAssigner
-          extends BoundedOutOfOrdernessTimestampExtractor<StreamingElement>
-  {
-    private final ExtractEventTime eventTimeFn;
-
-    EventTimeAssigner(Duration allowedLateness, ExtractEventTime eventTimeFn) {
-      super(millisTime(allowedLateness.toMillis()));
-      this.eventTimeFn = Objects.requireNonNull(eventTimeFn);
-    }
-
-    @SuppressWarnings("unchecked")
-    @Override
-    public long extractTimestamp(StreamingElement element) {
-      return eventTimeFn.extractTimestamp(element.getElement());
-    }
-
-    private static org.apache.flink.streaming.api.windowing.time.Time
-    millisTime(long millis) {
-      return org.apache.flink.streaming.api.windowing.time.Time.milliseconds(millis);
-    }
   }
 
   private static class WindowAssignerOperator

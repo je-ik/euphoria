@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,7 +18,9 @@ package cz.seznam.euphoria.spark;
 import cz.seznam.euphoria.core.client.graph.DAG;
 import cz.seznam.euphoria.core.client.graph.Node;
 import cz.seznam.euphoria.core.client.operator.Operator;
+import cz.seznam.euphoria.core.util.Settings;
 import cz.seznam.euphoria.shaded.guava.com.google.common.collect.Iterables;
+import cz.seznam.euphoria.spark.accumulators.SparkAccumulatorFactory;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 
@@ -37,9 +39,18 @@ public class SparkExecutorContext {
   private final DAG<Operator<?, ?>> dag;
   private final Map<Operator<?, ?>, JavaRDD<?>> outputs;
 
-  public SparkExecutorContext(JavaSparkContext env, DAG<Operator<?, ?>> dag) {
+  private final SparkAccumulatorFactory accumulatorFactory;
+  private final Settings settings;
+
+
+  public SparkExecutorContext(JavaSparkContext env,
+                              DAG<Operator<?, ?>> dag,
+                              SparkAccumulatorFactory accumulatorFactory,
+                              Settings settings) {
     this.env = env;
     this.dag = dag;
+    this.accumulatorFactory = accumulatorFactory;
+    this.settings = settings;
     this.outputs = new IdentityHashMap<>();
   }
 
@@ -108,5 +119,13 @@ public class SparkExecutorContext {
       throw new IllegalStateException(
               "Operator(" + operator.getName() + ") output already processed");
     }
+  }
+
+  public SparkAccumulatorFactory getAccumulatorFactory() {
+    return accumulatorFactory;
+  }
+
+  public Settings getSettings() {
+    return settings;
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 package cz.seznam.euphoria.core.executor;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
-import cz.seznam.euphoria.core.client.dataset.windowing.Batch;
+import cz.seznam.euphoria.core.client.dataset.windowing.GlobalWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.graph.DAG;
 import cz.seznam.euphoria.core.client.graph.Node;
@@ -103,7 +103,7 @@ class FlowValidator {
     if (operator instanceof WindowWiseOperator) {
       Windowing windowing = ((WindowWiseOperator) operator).getWindowing();
       if (windowing != null) {
-        return windowing instanceof Batch;
+        return windowing instanceof GlobalWindowing;
       }
     }
     List<Node<Operator<?, ?>>> parents = node.getParents();

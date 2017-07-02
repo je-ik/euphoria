@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -74,12 +74,11 @@ public class SumByKeyTest {
     Dataset<Pair<String, Long>> counted = SumByKey.of(dataset)
             .keyBy(s -> s)
             .valueBy(s -> 1L)
-            .windowBy(Time.of(Duration.ofHours(1)), s -> 0L)
+            .windowBy(Time.of(Duration.ofHours(1)))
             .output();
 
     SumByKey sum = (SumByKey) flow.operators().iterator().next();
     assertTrue(sum.getWindowing() instanceof Time);
-    assertNotNull(sum.getEventTimeAssigner());
   }
 
   @Test

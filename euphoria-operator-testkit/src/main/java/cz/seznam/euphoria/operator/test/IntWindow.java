@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ package cz.seznam.euphoria.operator.test;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 
-class IntWindow extends Window implements Comparable<IntWindow> {
+class IntWindow extends Window<IntWindow> {
   private int val;
 
   IntWindow(int val) {

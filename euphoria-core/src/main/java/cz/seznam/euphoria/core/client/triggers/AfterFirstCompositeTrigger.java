@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -75,13 +75,9 @@ public class AfterFirstCompositeTrigger<W extends Window> implements Trigger<W> 
   }
 
   @Override
-  public TriggerResult onMerge(W window, TriggerContext.TriggerMergeContext ctx) {
-    TriggerResult r = TriggerResult.NOOP;
+  public void onMerge(W window, TriggerContext.TriggerMergeContext ctx) {
     for (Trigger<W> t : subtriggers) {
-      r = TriggerResult.merge(
-              r, t.onMerge(window, ctx));
+      t.onMerge(window, ctx);
     }
-
-    return r;
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,28 +15,27 @@
  */
 package cz.seznam.euphoria.spark;
 
-import cz.seznam.euphoria.shaded.guava.com.google.common.base.Preconditions;
 import cz.seznam.euphoria.core.client.dataset.partitioning.Partitioning;
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.TimedWindow;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
+import cz.seznam.euphoria.core.client.functional.ReduceFunctor;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
-import cz.seznam.euphoria.core.client.operator.ExtractEventTime;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
 import cz.seznam.euphoria.core.client.util.Pair;
+import cz.seznam.euphoria.core.executor.util.SingleValueContext;
+import cz.seznam.euphoria.shaded.guava.com.google.common.base.Preconditions;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.function.Function2;
 import org.apache.spark.api.java.function.PairFlatMapFunction;
 import scala.Tuple2;
 
-import javax.annotation.Nullable;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Set;
 
 class ReduceByKeyTranslator implements SparkOperatorTranslator<ReduceByKey> {
 
@@ -52,9 +51,7 @@ class ReduceByKeyTranslator implements SparkOperatorTranslator<ReduceByKey> {
     @SuppressWarnings("unchecked")
     final JavaRDD<SparkElement> input = (JavaRDD<SparkElement>) context.getSingleInput(operator);
     @SuppressWarnings("unchecked")
-    final UnaryFunction<Iterable<Object>, Object> reducer = operator.getReducer();
-    @SuppressWarnings("unchecked")
-    final ExtractEventTime<?> eventTimeAssigner = operator.getEventTimeAssigner();
+    final ReduceFunctor<Iterable<Object>, Object> reducer = operator.getReducer();
 
     final Partitioning partitioning = operator.getPartitioning();
     final Windowing windowing =
@@ -74,8 +71,7 @@ class ReduceByKeyTranslator implements SparkOperatorTranslator<ReduceByKey> {
 
     // ~ extract key/value + timestamp from input elements and assign windows
     JavaPairRDD<KeyedWindow, TimestampedElement> tuples = input.flatMapToPair(
-            new CompositeKeyExtractor(
-                    keyExtractor, valueExtractor, windowing, eventTimeAssigner));
+            new CompositeKeyExtractor(keyExtractor, valueExtractor, windowing));
 
     JavaPairRDD<KeyedWindow, TimestampedElement> reduced;
     if (partitioning.hasDefaultPartitioner()) {
@@ -108,26 +104,18 @@ class ReduceByKeyTranslator implements SparkOperatorTranslator<ReduceByKey> {
     private final UnaryFunction keyExtractor;
     private final UnaryFunction valueExtractor;
     private final Windowing windowing;
-    @Nullable
-    private final ExtractEventTime eventTimeAssigner;
 
     public CompositeKeyExtractor(UnaryFunction keyExtractor,
                                  UnaryFunction valueExtractor,
-                                 Windowing windowing,
-                                 @Nullable ExtractEventTime eventTimeAssigner) {
+                                 Windowing windowing) {
       this.keyExtractor = keyExtractor;
       this.valueExtractor = valueExtractor;
       this.windowing = windowing;
-      this.eventTimeAssigner = eventTimeAssigner;
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public Iterator<Tuple2<KeyedWindow, TimestampedElement>> call(SparkElement wel) throws Exception {
-      if (eventTimeAssigner != null) {
-        wel.setTimestamp(eventTimeAssigner.extractTimestamp(wel.getElement()));
-      }
-
       Iterable<Window> windows = windowing.assignWindowsToElement(wel);
       List<Tuple2<KeyedWindow, TimestampedElement>> out = new ArrayList<>();
       for (Window wid : windows) {
@@ -143,28 +131,33 @@ class ReduceByKeyTranslator implements SparkOperatorTranslator<ReduceByKey> {
     }
   }
 
-
   private static class Reducer implements
           Function2<TimestampedElement, TimestampedElement, TimestampedElement> {
 
-    private final UnaryFunction<Iterable<Object>, Object> reducer;
+    private final ReduceFunctor<Iterable<Object>, Object> reducer;
 
     // cached array to avoid repeated allocation
     private Object[] iterable;
+    private SingleValueContext<Object> context;
 
-    private Reducer(UnaryFunction<Iterable<Object>, Object> reducer) {
+    private Reducer(ReduceFunctor<Iterable<Object>, Object> reducer) {
       this.reducer = reducer;
       this.iterable = new Object[2];
     }
 
+    @SuppressWarnings("unchecked")
     @Override
     public TimestampedElement call(TimestampedElement o1, TimestampedElement o2) {
+      if (context == null) {
+        context = new SingleValueContext<>();
+      }
       iterable[0] = o1.getElement();
       iterable[1] = o2.getElement();
-      Object result = reducer.apply(Arrays.asList(iterable));
+      reducer.apply((Iterable) Arrays.asList(iterable), context);
 
       return new TimestampedElement(
-              Math.max(o1.getTimestamp(), o2.getTimestamp()), result);
+          Math.max(o1.getTimestamp(), o2.getTimestamp()),
+          context.getAndResetValue());
     }
   }
 }

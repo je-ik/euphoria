@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,10 @@
  */
 package cz.seznam.euphoria.inmem;
 
+import cz.seznam.euphoria.core.client.accumulators.AccumulatorProvider;
+import cz.seznam.euphoria.core.client.accumulators.VoidAccumulatorProvider;
 import cz.seznam.euphoria.core.client.dataset.partitioning.Partitioning;
-import cz.seznam.euphoria.core.client.dataset.windowing.Batch;
+import cz.seznam.euphoria.core.client.dataset.windowing.GlobalWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
@@ -41,6 +43,7 @@ import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.core.executor.Executor;
 import cz.seznam.euphoria.core.executor.FlowUnfolder;
 import cz.seznam.euphoria.core.executor.FlowUnfolder.InputOperator;
+import cz.seznam.euphoria.core.util.Settings;
 import cz.seznam.euphoria.shaded.guava.com.google.common.collect.Iterables;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -113,7 +116,7 @@ public class InMemExecutor implements Executor {
       Object next = this.reader.next();
       // we assign it to batch
       // which means null group, and batch label
-      return Datum.of(Batch.BatchWindow.get(), next,
+      return Datum.of(GlobalWindowing.Window.get(), next,
           // ingestion time
           System.currentTimeMillis());
     }
@@ -185,12 +188,18 @@ public class InMemExecutor implements Executor {
   }
 
   private static final class ExecutionContext {
+    private final Settings settings;
+
     // map of operator inputs to suppliers
-    Map<Pair<Operator<?, ?>, Operator<?, ?>>, InputProvider> materializedOutputs
-        = Collections.synchronizedMap(new HashMap<>());
+    Map<Pair<Operator<?, ?>, Operator<?, ?>>, InputProvider> materializedOutputs;
     // already running operators
-    Set<Operator<?, ?>> runningOperators = Collections.synchronizedSet(
-        new HashSet<>());
+    Set<Operator<?, ?>> runningOperators;
+
+    public ExecutionContext(Settings settings) {
+      this.settings = settings;
+      this.materializedOutputs = Collections.synchronizedMap(new HashMap<>());
+      this.runningOperators = Collections.synchronizedSet(new HashSet<>());
+    }
 
     private boolean containsKey(Pair<Operator<?, ?>, Operator<?, ?>> d) {
       return materializedOutputs.containsKey(d);
@@ -222,6 +231,10 @@ public class InMemExecutor implements Executor {
     boolean isRunning(Operator<?, ?> operator) {
       return runningOperators.contains(operator);
     }
+
+    public Settings getSettings() {
+      return settings;
+    }
   }
 
   private final BlockingQueue<Runnable> queue = new SynchronousQueue<>(false);
@@ -248,8 +261,28 @@ public class InMemExecutor implements Executor {
       = ProcessingTimeTriggerScheduler::new;
 
   private boolean allowWindowBasedShuffling = false;
+  private boolean allowEarlyEmitting = false;
 
   private StorageProvider storageProvider = new InMemStorageProvider();
+
+  private AccumulatorProvider.Factory accumulatorFactory =
+          VoidAccumulatorProvider.getFactory();
+
+  /**
+   * Specifies whether stateful operators are allowed to emit their results
+   * early.<p>
+   *
+   * Defaults to {@code false}.
+   *
+   * @param allowEarlyEmitting {@code true} to allow states to emit early
+   *                           results, {@code false} otherwise
+   *
+   * @return this instance (for method chaining purposes)
+   */
+  public InMemExecutor setAllowEarlyEmitting(boolean allowEarlyEmitting) {
+    this.allowEarlyEmitting = allowEarlyEmitting;
+    return this;
+  }
 
   /**
    * Set supplier for watermark emit strategy used in state operations.
@@ -318,6 +351,11 @@ public class InMemExecutor implements Executor {
     executor.shutdownNow();
   }
 
+  @Override
+  public void setAccumulatorProvider(AccumulatorProvider.Factory factory) {
+    this.accumulatorFactory = Objects.requireNonNull(factory);
+  }
+
   private Executor.Result execute(Flow flow) {
     // transform the given flow to DAG of basic operators
     DAG<Operator<?, ?>> dag = FlowUnfolder.unfold(flow, Executor.getBasicOps());
@@ -332,7 +370,7 @@ public class InMemExecutor implements Executor {
     }
 
     for (ExecUnit unit : units) {
-      ExecutionContext context = new ExecutionContext();
+      ExecutionContext context = new ExecutionContext(flow.getSettings());
 
       execUnit(unit, context);
     
@@ -533,6 +571,7 @@ public class InMemExecutor implements Executor {
         flatMap.getSingleParentOrNull().get(), flatMap.get());
     InputProvider ret = new InputProvider();
     final UnaryFunctor mapper = flatMap.get().getFunctor();
+    final ExtractEventTime eventTimeFn = flatMap.get().getEventTimeExtractor();
     for (Supplier s : suppliers) {
       final BlockingQueue<Datum> out = new ArrayBlockingQueue(5000);
       ret.add(QueueSupplier.wrap(out));
@@ -542,12 +581,18 @@ public class InMemExecutor implements Executor {
           try {
             // read input
             Datum item = s.get();
+            if (eventTimeFn != null && item.isElement()) {
+              item.setTimestamp(eventTimeFn.extractTimestamp(item.getElement()));
+            }
             WindowedElementCollector outC = new WindowedElementCollector(
-                collector, item::getTimestamp);
+                collector, item::getTimestamp, accumulatorFactory, context.getSettings());
             if (item.isElement()) {
               // transform
               outC.setWindow(item.getWindow());
               mapper.apply(item.getElement(), outC);
+            } else if (eventTimeFn != null && item.isWatermark()) {
+              // ~ do no forward old watermarks since we are redefining
+              // them as part of the time assignment function
             } else {
               out.put(item);
               if (item.isEndOfStream()) {
@@ -579,7 +624,7 @@ public class InMemExecutor implements Executor {
     }
 
     List<BlockingQueue<Datum>> outputQueues = repartitionSuppliers(
-        input, e -> e, partitioning, Optional.empty(), Optional.empty());
+        input, e -> e, partitioning, Optional.empty());
 
     InputProvider ret = new InputProvider();
     outputQueues.stream()
@@ -603,11 +648,9 @@ public class InMemExecutor implements Executor {
 
     final Partitioning partitioning = reduceStateByKey.getPartitioning();
     final Windowing windowing = reduceStateByKey.getWindowing();
-    final ExtractEventTime eventTimeAssigner = reduceStateByKey.getEventTimeAssigner();
 
     List<BlockingQueue<Datum>> repartitioned = repartitionSuppliers(
-        suppliers, keyExtractor, partitioning,
-        Optional.ofNullable(windowing), Optional.ofNullable(eventTimeAssigner));
+        suppliers, keyExtractor, partitioning, Optional.ofNullable(windowing));
 
     InputProvider outputSuppliers = new InputProvider();
     TriggerScheduler triggerScheduler = triggerSchedulerSupplier.get();
@@ -632,7 +675,10 @@ public class InMemExecutor implements Executor {
                   ? triggerSchedulerSupplier.get()
                   : new WatermarkTriggerScheduler(watermarkDuration)),
           watermarkEmitStrategySupplier.get(),
-          storageProvider));
+          storageProvider,
+          accumulatorFactory,
+          context.getSettings(),
+          allowEarlyEmitting));
     }
     return outputSuppliers;
   }
@@ -642,14 +688,12 @@ public class InMemExecutor implements Executor {
       InputProvider suppliers,
       final UnaryFunction keyExtractor,
       final Partitioning partitioning,
-      final Optional<Windowing> windowing,
-      final Optional<ExtractEventTime> eventTimeAssigner) {
+      final Optional<Windowing> windowing) {
 
     int numInputPartitions = suppliers.size();
     final boolean isMergingWindowing = windowing.isPresent()
         && windowing.get() instanceof MergingWindowing;
-    final boolean hasTimeAssignment = eventTimeAssigner.isPresent();
-    
+
     final int outputPartitions = partitioning.getNumPartitions() > 0
         ? partitioning.getNumPartitions() : numInputPartitions;
     final List<BlockingQueue<Datum>> ret = new ArrayList<>(outputPartitions);
@@ -684,11 +728,9 @@ public class InMemExecutor implements Executor {
       Runnable emitWatermark = () -> {
         handleMetaData(
             Datum.watermark(maxElementTimestamp.get()),
-            ret, readerId, clocks, true);
+            ret, readerId, clocks);
       };
-      if (emitStrategies != null) {
-        emitStrategies[readerId].schedule(emitWatermark);
-      }
+      emitStrategies[readerId].schedule(emitWatermark);
       executor.execute(() -> {
         try {
           for (;;) {
@@ -699,12 +741,7 @@ public class InMemExecutor implements Executor {
               break;
             }
 
-            if (eventTimeAssigner.isPresent() && datum.isElement()) {
-              ExtractEventTime assigner = eventTimeAssigner.get();
-              datum.setTimestamp(assigner.extractTimestamp(datum.getElement()));
-            }
-
-            if (!handleMetaData(datum, ret, readerId, clocks, !hasTimeAssignment)) {
+            if (!handleMetaData(datum, ret, readerId, clocks)) {
 
               // extract element's timestamp if available
               long elementStamp = datum.getTimestamp();
@@ -794,29 +831,25 @@ public class InMemExecutor implements Executor {
       Datum item,
       List<BlockingQueue<Datum>> downstream,
       int readerId,
-      List<VectorClock> clocks,
-      boolean allowWatermarks) {
+      List<VectorClock> clocks) {
 
-
-    if (allowWatermarks || !item.isWatermark()) {
-      // update vector clocks by the watermark
-      // if any update occurs, emit the updates time downstream
-      int i = 0;
-      long stamp = item.getTimestamp();
-      for (VectorClock clock : clocks) {
-        long current = clock.getCurrent();
-        clock.update(stamp, readerId);
-        long after = clock.getCurrent();
-        if (current != after) {
-          try {
-            // we have updated the stamp, emit the new watermark
-            downstream.get(i).put(Datum.watermark(after));
-          } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-          }
+    // update vector clocks by the watermark
+    // if any update occurs, emit the updates time downstream
+    int i = 0;
+    long stamp = item.getTimestamp();
+    for (VectorClock clock : clocks) {
+      long current = clock.getCurrent();
+      clock.update(stamp, readerId);
+      long after = clock.getCurrent();
+      if (current != after) {
+        try {
+          // we have updated the stamp, emit the new watermark
+          downstream.get(i).put(Datum.watermark(after));
+        } catch (InterruptedException ex) {
+          Thread.currentThread().interrupt();
         }
-        i++;
       }
+      i++;
     }
 
     // watermark already handled

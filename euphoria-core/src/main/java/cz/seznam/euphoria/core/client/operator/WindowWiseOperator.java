@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
  */
 package cz.seznam.euphoria.core.client.operator;
 
-import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
+import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.flow.Flow;
 
 import javax.annotation.Nullable;
@@ -30,27 +30,17 @@ public abstract class WindowWiseOperator<
 
   @Nullable
   protected Windowing<WIN, W> windowing;
-  @Nullable
-  protected ExtractEventTime<WIN> eventTimeAssigner;
 
   public WindowWiseOperator(String name,
                             Flow flow,
-                            @Nullable Windowing<WIN, W> windowing,
-                            @Nullable ExtractEventTime<WIN> eventTimeAssigner) {
+                            @Nullable Windowing<WIN, W> windowing) {
     super(name, flow);
     this.windowing = windowing;
-    this.eventTimeAssigner = eventTimeAssigner;
   }
 
   @Nullable
   @Override
   public Windowing<WIN, W> getWindowing() {
     return windowing;
-  }
-
-  @Nullable
-  @Override
-  public ExtractEventTime<WIN> getEventTimeAssigner() {
-    return eventTimeAssigner;
   }
 }

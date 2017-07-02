@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,22 +19,25 @@ import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.TimedWindow;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
-import cz.seznam.euphoria.core.client.functional.CombinableReduceFunction;
-import cz.seznam.euphoria.core.client.functional.StateFactory;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.flink.accumulators.AbstractCollector;
 import cz.seznam.euphoria.core.client.operator.state.ListStorage;
 import cz.seznam.euphoria.core.client.operator.state.ListStorageDescriptor;
 import cz.seznam.euphoria.core.client.operator.state.MergingStorageDescriptor;
 import cz.seznam.euphoria.core.client.operator.state.State;
+import cz.seznam.euphoria.core.client.operator.state.StateFactory;
+import cz.seznam.euphoria.core.client.operator.state.StateMerger;
 import cz.seznam.euphoria.core.client.operator.state.StorageDescriptor;
 import cz.seznam.euphoria.core.client.operator.state.ValueStorage;
 import cz.seznam.euphoria.core.client.operator.state.ValueStorageDescriptor;
 import cz.seznam.euphoria.core.client.triggers.Trigger;
 import cz.seznam.euphoria.core.client.triggers.TriggerContext;
 import cz.seznam.euphoria.core.client.util.Pair;
+import cz.seznam.euphoria.core.util.Settings;
+import cz.seznam.euphoria.flink.accumulators.FlinkAccumulatorFactory;
 import cz.seznam.euphoria.flink.storage.Descriptors;
 import cz.seznam.euphoria.flink.streaming.StreamingElement;
 import cz.seznam.euphoria.shaded.guava.com.google.common.collect.Lists;
+import org.apache.flink.api.common.functions.RuntimeContext;
 import org.apache.flink.api.common.state.ListState;
 import org.apache.flink.api.common.state.ListStateDescriptor;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
@@ -65,8 +68,8 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
 
   private final Windowing<?, WID> windowing;
   private final Trigger<WID> trigger;
-  private final StateFactory<?, State> stateFactory;
-  private final CombinableReduceFunction<State> stateCombiner;
+  private final StateFactory<?, ?, State<?, ?>> stateFactory;
+  private final StateMerger<?, ?, State<?, ?>> stateCombiner;
 
 
   // FIXME Arguable hack that ensures all remaining opened windows
@@ -77,8 +80,14 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
   /** True when executor is running in local test (mode) */
   private final boolean localMode;
 
+  /** See {@link cz.seznam.euphoria.core.executor.greduce.GroupReducer#allowEarlyEmitting} */
+  private final boolean allowEarlyEmitting;
+
   // see {@link WindowedStorageProvider}
   private final int descriptorsCacheMaxSize;
+
+  private final FlinkAccumulatorFactory accumulatorFactory;
+  private final Settings settings;
 
   private transient InternalTimerService<WID> timerService;
 
@@ -86,7 +95,7 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
   private transient InternalTimerService<WID> endOfStreamTimerService;
 
   private transient TriggerContextAdapter triggerContext;
-  private transient OutputContext outputContext;
+  private transient OutputCollector outputContext;
   private transient WindowedStorageProvider storageProvider;
 
   private transient ListStateDescriptor<Tuple2<WID, WID>> mergingWindowsDescriptor;
@@ -94,16 +103,22 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
   private transient TypeSerializer<WID> windowSerializer;
 
   public AbstractWindowOperator(Windowing<?, WID> windowing,
-                                StateFactory<?, State> stateFactory,
-                                CombinableReduceFunction<State> stateCombiner,
+                                StateFactory<?, ?, State<?, ?>> stateFactory,
+                                StateMerger<?, ?, State<?, ?>> stateCombiner,
                                 boolean localMode,
-                                int descriptorsCacheMaxSize) {
+                                int descriptorsCacheMaxSize,
+                                boolean allowEarlyEmitting,
+                                FlinkAccumulatorFactory accumulatorFactory,
+                                Settings settings) {
     this.windowing = Objects.requireNonNull(windowing);
     this.trigger = windowing.getTrigger();
     this.stateFactory = Objects.requireNonNull(stateFactory);
     this.stateCombiner = Objects.requireNonNull(stateCombiner);
     this.localMode = localMode;
     this.descriptorsCacheMaxSize = descriptorsCacheMaxSize;
+    this.allowEarlyEmitting = allowEarlyEmitting;
+    this.accumulatorFactory = Objects.requireNonNull(accumulatorFactory);
+    this.settings = Objects.requireNonNull(settings);
   }
 
   @Override
@@ -120,7 +135,7 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
     this.endOfStreamTimerService =
             getInternalTimerService("end-of-stream-timers", windowSerializer, this);
     this.triggerContext = new TriggerContextAdapter();
-    this.outputContext = new OutputContext();
+    this.outputContext = new OutputCollector(accumulatorFactory, settings, getRuntimeContext());
     this.storageProvider = new WindowedStorageProvider<>(
             getKeyedStateBackend(), windowSerializer, descriptorsCacheMaxSize);
 
@@ -170,10 +185,8 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
                   setupEnvironment(getCurrentKey(), mergeResult);
                   triggerContext.setWindow(mergeResult);
 
-                  processTriggerResult(mergeResult,
-                          null,
-                          triggerContext.onMerge(mergedWindows),
-                          mergingWindowSet);
+                  // merge trigger states
+                  triggerContext.onMerge(mergedWindows);
 
                   // clear all merged windows
                   for (WID merged : mergedWindows) {
@@ -182,16 +195,12 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
                     removeWindow(merged, null);
                   }
 
-                  // FIXME This implementation relies on fact that
-                  // stateCombiner function is actually "fold left".
-                  // That means the result state will end up in the
-                  // first state given to the combiner function.
-
                   // merge all mergedStateWindows into stateResultWindow
-                  List<State> states = new ArrayList<>();
-                  states.add(getWindowState(stateResultWindow));
-                  mergedStateWindows.forEach(sw -> states.add(getWindowState(sw)));
-                  stateCombiner.apply(states);
+                  {
+                    List<State> states = new ArrayList<>();
+                    mergedStateWindows.forEach(sw -> states.add(getWindowState(sw)));
+                    stateCombiner.merge(getWindowState(stateResultWindow), (List) states);
+                  }
 
                   // remove merged window states
                   mergedStateWindows.forEach(sw -> {
@@ -290,6 +299,7 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
     output.emitWatermark(mark);
   }
 
+  @SuppressWarnings("unchecked")
   private void processTriggerResult(WID window,
                                     // ~ @windowState the state of `window` to
                                     // use; if `null` the state will be fetched
@@ -308,11 +318,12 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
       }
 
       if (tr.isFlush()) {
-        windowState.flush();
+        windowState.flush(outputContext);
       }
 
       if (tr.isPurge()) {
         windowState.close();
+        storageProvider.setWindow(window);
         trigger.onClear(window, triggerContext);
         removeWindow(window, mergingWindowSet);
       }
@@ -322,7 +333,7 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
   @SuppressWarnings("unchecked")
   private State getWindowState(WID window) {
     storageProvider.setWindow(window);
-    return stateFactory.apply(outputContext, storageProvider);
+    return stateFactory.createState(storageProvider, allowEarlyEmitting ? outputContext : null);
   }
 
   private MergingWindowSet<WID> getMergingWindowSet()  {
@@ -417,9 +428,9 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
       throw new UnsupportedOperationException(descriptor + " is not supported for merging yet!");
     }
 
-    private Trigger.TriggerResult onMerge(Iterable<WID> mergedWindows) {
+    private void onMerge(Iterable<WID> mergedWindows) {
       this.mergedWindows = Lists.newArrayList(mergedWindows);
-      return trigger.onMerge(window, this);
+      trigger.onMerge(window, this);
     }
 
     private void setWindow(WID window) {
@@ -427,12 +438,18 @@ public abstract class AbstractWindowOperator<I, KEY, WID extends Window>
     }
   }
 
-  private class OutputContext implements Context {
+  private class OutputCollector extends AbstractCollector {
 
     private Object key;
     private Window window;
 
     private final StreamRecord reuse = new StreamRecord<>(null);
+
+    public OutputCollector(FlinkAccumulatorFactory accumulatorFactory,
+                           Settings settings,
+                           RuntimeContext flinkContext) {
+      super(accumulatorFactory, settings, flinkContext);
+    }
 
     @Override
     @SuppressWarnings("unchecked")

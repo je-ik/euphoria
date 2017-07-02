@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -131,7 +131,7 @@ public class HadoopSink<K, V>
     @Override
     public void write(Pair<K, V> record) throws IOException {
       try {
-        hadoopWriter.write(record.getKey(), record.getValue());
+        hadoopWriter.write(record.getFirst(), record.getSecond());
       } catch (InterruptedException e) {
         throw new IOException(e);
       }

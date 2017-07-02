@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,10 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package cz.seznam.euphoria.operator.test;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.dataset.windowing.Count;
+import cz.seznam.euphoria.core.client.dataset.windowing.GlobalWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.Session;
 import cz.seznam.euphoria.core.client.dataset.windowing.Time;
@@ -24,8 +26,11 @@ import cz.seznam.euphoria.core.client.dataset.windowing.TimeInterval;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
+import cz.seznam.euphoria.core.client.functional.ReduceFunction;
+import cz.seznam.euphoria.core.client.functional.ReduceFunctor;
 import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
+import cz.seznam.euphoria.core.client.operator.AssignEventTime;
 import cz.seznam.euphoria.core.client.operator.FlatMap;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
 import cz.seznam.euphoria.core.client.operator.ReduceStateByKey;
@@ -40,6 +45,7 @@ import cz.seznam.euphoria.core.client.triggers.TriggerContext;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.core.client.util.Sums;
 import cz.seznam.euphoria.core.client.util.Triple;
+import cz.seznam.euphoria.operator.test.accumulators.SnapshotProvider;
 import cz.seznam.euphoria.operator.test.junit.AbstractOperatorTest;
 import cz.seznam.euphoria.operator.test.junit.Processing;
 import cz.seznam.euphoria.shaded.guava.com.google.common.base.Joiner;
@@ -61,7 +67,9 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Test operator {@code ReduceByKey}.
@@ -84,7 +92,7 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
         return ReduceByKey.of(input)
             .keyBy(e -> e % 2)
             .valueBy(e -> e)
-            .reduceBy(Sets::newHashSet)
+            .reduceBy((ReduceFunction<Integer, HashSet<Integer>>) Sets::newHashSet)
             .windowBy(Count.of(3))
             .output();
       }
@@ -121,18 +129,77 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
     });
   }
 
+  /** Validates the output type upon a `.reduceBy` operation on windows of size one. */
+  @Test
+  public void testReductionType0MultiValues() {
+    execute(new AbstractTestCase<Integer, Pair<Integer, Integer>>() {
+      @Override
+      protected Partitions<Integer> getInput() {
+        return Partitions.add(asList(1, 2, 3, 4, 5, 6, 7, 9)).build();
+      }
+
+      @Override
+      protected Dataset<Pair<Integer, Integer>>
+      getOutput(Dataset<Integer> input) {
+        return ReduceByKey.of(input)
+            .keyBy(e -> e % 2)
+            .valueBy(e -> e)
+            .reduceBy((Iterable<Integer> in, Collector<Integer> ctx) -> {
+              // start with seed based on window
+              int sum = 0;
+              for (Integer i : in) {
+                sum += i;
+                ctx.collect(sum);
+              }
+            })
+            .windowBy(Count.of(3))
+            .output();
+      }
+
+      @Override
+      public int getNumOutputPartitions() {
+        return 1;
+      }
+
+      @Override
+      public void validate(Partitions<Pair<Integer, Integer>> partitions) {
+        List<Pair<Integer, Integer>> ps = partitions.get(0);
+        HashMap<Integer, List<Integer>> byKey = new HashMap<>();
+        for (Pair<Integer, Integer> p : ps) {
+          List<Integer> xs = byKey.computeIfAbsent(p.getFirst(), k -> new ArrayList<>());
+          xs.add(p.getSecond());
+        }
+
+        assertEquals(2, byKey.size());
+
+        assertNotNull(byKey.get(0));
+        assertEquals(3, byKey.get(0).size());
+        assertEquals(Arrays.asList(2, 6, 12), byKey.get(0));
+
+        // ~ cannot make any assumption about the order of the elements in the windows
+        // (on batch) since we have no event-time order for the test data
+        assertNotNull(byKey.get(1));
+        assertEquals(
+            Sets.newHashSet(1, 4, 9, 7, 16),
+            byKey.get(1).stream().collect(Collectors.toSet()));
+      }
+    });
+  }
+
+
   @Test
   public void testEventTime() {
     execute(new AbstractTestCase<Pair<Integer, Long>, Pair<Integer, Long>>() {
 
       @Override
       protected Dataset<Pair<Integer, Long>> getOutput(Dataset<Pair<Integer, Long>> input) {
+        input = AssignEventTime.of(input).using(Pair::getSecond).output();
         return ReduceByKey.of(input)
             .keyBy(Pair::getFirst)
             .valueBy(e -> 1L)
             .combineBy(Sums.ofLongs())
             .setPartitioner(e -> e % 2)
-            .windowBy(Time.of(Duration.ofSeconds(1)), Pair::getSecond)
+            .windowBy(Time.of(Duration.ofSeconds(1)))
             .output();
       }
 
@@ -286,7 +353,7 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
   // ----------------------------------------------------------------------------
 
   // ~ every instance is unique: this allows us to exercise merging
-  static final class CWindow extends Window implements Comparable<CWindow> {
+  static final class CWindow extends Window<CWindow> {
 
     static int _idCounter = 0;
     static final Object _idCounterMutex = new Object();
@@ -355,12 +422,8 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
     }
 
     @Override
-    public TriggerResult onMerge(CWindow w, TriggerContext.TriggerMergeContext ctx) {
+    public void onMerge(CWindow w, TriggerContext.TriggerMergeContext ctx) {
       ctx.mergeStoredState(countDesc);
-      if (ctx.getValueStorage(countDesc).get() >= w.bucket) {
-        return TriggerResult.FLUSH_AND_PURGE;
-      }
-      return TriggerResult.NOOP;
     }
   }
 
@@ -481,13 +544,13 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
       @Override
       protected Dataset<Triple<TimeInterval, Integer, HashSet<String>>> getOutput
           (Dataset<Pair<String, Integer>> input) {
+        input = AssignEventTime.of(input).using(e -> e.getSecond() * 1000L).output();
         Dataset<Pair<Integer, HashSet<String>>> reduced =
             ReduceByKey.of(input)
                 .keyBy(e -> e.getFirst().charAt(0) - '0')
                 .valueBy(Pair::getFirst)
-                .reduceBy(Sets::newHashSet)
-                .windowBy(Session.of(Duration.ofSeconds(5)),
-                        e -> e.getSecond() * 1_000L)
+                .reduceBy((ReduceFunction<String, HashSet<String>>) Sets::newHashSet)
+                .windowBy(Session.of(Duration.ofSeconds(5)))
                 .setNumPartitions(1)
                 .output();
 
@@ -535,11 +598,10 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
 
   // ~ ------------------------------------------------------------------------------
 
-  static class SumState extends State<Integer, Integer> {
+  static class SumState implements State<Integer, Integer> {
     private final ValueStorage<Integer> sum;
 
-    SumState(Context<Integer> context, StorageProvider storageProvider) {
-      super(context, storageProvider);
+    SumState(StorageProvider storageProvider, Collector<Integer> context) {
       sum = storageProvider.getValueStorage(
           ValueStorageDescriptor.of("sum-state", Integer.class, 0));
     }
@@ -550,8 +612,8 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
     }
 
     @Override
-    public void flush() {
-      getContext().collect(sum.get());
+    public void flush(Collector<Integer> context) {
+      context.collect(sum.get());
     }
 
     @Override
@@ -559,15 +621,10 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
       sum.clear();
     }
 
-    static SumState combine(Iterable<SumState> states) {
-      SumState target = null;
-      for (SumState state : states) {
-        if (target == null) {
-          target = new SumState(state.getContext(), state.getStorageProvider());
-        }
-        target.add(state.sum.get());
+    static void combine(SumState target, Iterable<SumState> others) {
+      for (SumState other : others) {
+        target.add(other.sum.get());
       }
-      return target;
     }
   }
 
@@ -619,12 +676,13 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
       protected Dataset<Integer> getOutput(Dataset<Pair<Integer, Long>> input) {
         // ~ this operator is supposed to emit elements internally with a timestamp
         // which equals the emission (== end in this case) of the time window
+        input = AssignEventTime.of(input).using(Pair::getSecond).output();
         Dataset<Pair<String, Integer>> reduced =
             ReduceByKey.of(input)
                 .keyBy(e -> "")
                 .valueBy(Pair::getFirst)
                 .combineBy(Sums.ofInts())
-                .windowBy(Time.of(Duration.ofSeconds(5)), Pair::getSecond)
+                .windowBy(Time.of(Duration.ofSeconds(5)))
                 .output();
         // ~ now use a custom windowing with a trigger which does
         // the assertions subject to this test (use RSBK which has to
@@ -634,7 +692,7 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
                 .keyBy(Pair::getFirst)
                 .valueBy(Pair::getSecond)
                 .stateFactory(SumState::new)
-                .combineStateBy(SumState::combine)
+                .mergeStatesBy(SumState::combine)
                 .windowBy(new AssertingWindowing<>())
                 .output();
         return FlatMap.of(output)
@@ -653,5 +711,135 @@ public class ReduceByKeyTest extends AbstractOperatorTest {
         Assert.assertEquals(asList(4, 6), Util.sorted(partitions.get(0), Comparator.naturalOrder()));
       }
     });
+  }
+
+  @Test
+  public void testReduceByKeyWithWrongHashCodeImpl() {
+    execute(new AbstractTestCase<Pair<Word, Long>, Pair<Word, Long>>() {
+
+      @Override
+      protected Dataset<Pair<Word, Long>> getOutput(Dataset<Pair<Word, Long>> input) {
+        input = AssignEventTime.of(input).using(Pair::getSecond).output();
+        return ReduceByKey.of(input)
+                .keyBy(Pair::getFirst)
+                .valueBy(e -> 1L)
+                .combineBy(Sums.ofLongs())
+                .windowBy(Time.of(Duration.ofSeconds(1)))
+                .output();
+      }
+
+      @Override
+      protected Partitions<Pair<Word, Long>> getInput() {
+        return Partitions
+                .add(
+                        Pair.of(new Word("euphoria"), 300L),
+                        Pair.of(new Word("euphoria"), 600L),
+                        Pair.of(new Word("spark"), 900L),
+                        Pair.of(new Word("euphoria"), 1300L),
+                        Pair.of(new Word("flink"), 1600L),
+                        Pair.of(new Word("spark"), 1900L))
+                .build();
+      }
+
+      @Override
+      public int getNumOutputPartitions() {
+        return 2;
+      }
+
+      @Override
+      public void validate(Partitions<Pair<Word, Long>> partitions) {
+        assertEquals(2, partitions.size());
+        List<Pair<Word, Long>> data = partitions.get(0);
+        assertUnorderedEquals(Arrays.asList(
+                Pair.of(new Word("euphoria"), 2L), Pair.of(new Word("spark"), 1L),  // first window
+                Pair.of(new Word("euphoria"), 1L), Pair.of(new Word("spark"), 1L),  // second window
+                Pair.of(new Word("flink"), 1L)),
+                data);
+      }
+    });
+  }
+
+  @Test
+  public void testAccumulators() {
+    execute(new AbstractTestCase<Integer, Pair<Integer, Integer>>() {
+      @Override
+      protected Partitions<Integer> getInput() {
+        return Partitions.add(asList(1, 2, 3, 4, 5)).build();
+      }
+
+      @Override
+      protected Dataset<Pair<Integer, Integer>>
+      getOutput(Dataset<Integer> input) {
+        return ReduceByKey.of(input)
+            .keyBy(e -> e % 2)
+            .valueBy(e -> e)
+            .reduceBy((ReduceFunctor<Integer, Integer>) (elems, collector) -> {
+              int sum = 0;
+              for (Integer elem : elems) {
+                sum += elem;
+                if (elem % 2 == 0) {
+                  collector.getCounter("evens").increment();
+                } else {
+                  collector.getCounter("odds").increment();
+                }
+              }
+              collector.collect(sum);
+            })
+            .windowBy(GlobalWindowing.get())
+            .output();
+      }
+
+      @Override
+      public int getNumOutputPartitions() {
+        return 1;
+      }
+
+      @SuppressWarnings("unchecked")
+      @Override
+      public void validate(Partitions<Pair<Integer, Integer>> partitions) {
+        assertEquals(
+            Sets.newHashSet(Pair.of(1, 9), Pair.of(0, 6)),
+            new HashSet<>(partitions.get(0)));
+      }
+
+      @Override
+      public void validateAccumulators(SnapshotProvider snapshots) {
+        Map<String, Long> counters = snapshots.getCounterSnapshots();
+        assertEquals(Long.valueOf(2), counters.get("evens"));
+        assertEquals(Long.valueOf(3), counters.get("odds"));
+      }
+    });
+  }
+
+  /**
+   * String with invalid hash code implementation returning constant.
+   */
+  private static class Word {
+    private final String str;
+
+    public Word(String str) {
+      this.str = str;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (!(o instanceof Word)) return false;
+
+      Word word = (Word) o;
+
+      return !(str != null ? !str.equals(word.str) : word.str != null);
+
+    }
+
+    @Override
+    public int hashCode() {
+      return 42;
+    }
+
+    @Override
+    public String toString() {
+      return str;
+    }
   }
 }

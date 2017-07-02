@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -71,7 +71,7 @@ public class KafkaSink implements DataSink<Pair<byte[], byte[]>> {
     @Override
     public void write(Pair<byte[], byte[]> elem) throws IOException {
       final ProducerRecord r =
-          new ProducerRecord(topicId, partition, elem.getKey(), elem.getValue());
+          new ProducerRecord(topicId, partition, elem.getFirst(), elem.getSecond());
       fs.addLast(producer.send(r));
 
       // ~ try to consume already finished futures ... preventing the pool of futures

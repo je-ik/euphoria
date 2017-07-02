@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,6 @@
  */
 package cz.seznam.euphoria.operator.test;
 
-import cz.seznam.euphoria.shaded.guava.com.google.common.collect.Lists;
 import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.dataset.windowing.Count;
 import cz.seznam.euphoria.core.client.dataset.windowing.Session;
@@ -25,16 +24,16 @@ import cz.seznam.euphoria.core.client.dataset.windowing.TimeSliding;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
-import cz.seznam.euphoria.core.client.functional.StateFactory;
-import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
-import cz.seznam.euphoria.core.client.io.Context;
-import cz.seznam.euphoria.core.client.operator.ExtractEventTime;
+import cz.seznam.euphoria.core.client.io.Collector;
+import cz.seznam.euphoria.core.client.operator.AssignEventTime;
 import cz.seznam.euphoria.core.client.operator.FlatMap;
 import cz.seznam.euphoria.core.client.operator.ReduceStateByKey;
 import cz.seznam.euphoria.core.client.operator.state.ListStorage;
 import cz.seznam.euphoria.core.client.operator.state.ListStorageDescriptor;
 import cz.seznam.euphoria.core.client.operator.state.State;
+import cz.seznam.euphoria.core.client.operator.state.StateFactory;
+import cz.seznam.euphoria.core.client.operator.state.StateMerger;
 import cz.seznam.euphoria.core.client.operator.state.StorageProvider;
 import cz.seznam.euphoria.core.client.operator.state.ValueStorage;
 import cz.seznam.euphoria.core.client.operator.state.ValueStorageDescriptor;
@@ -43,8 +42,10 @@ import cz.seznam.euphoria.core.client.triggers.Trigger;
 import cz.seznam.euphoria.core.client.triggers.TriggerContext;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.core.client.util.Triple;
+import cz.seznam.euphoria.operator.test.accumulators.SnapshotProvider;
 import cz.seznam.euphoria.operator.test.junit.AbstractOperatorTest;
 import cz.seznam.euphoria.operator.test.junit.Processing;
+import cz.seznam.euphoria.shaded.guava.com.google.common.collect.Lists;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -53,7 +54,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -68,26 +68,11 @@ import static org.junit.Assert.assertTrue;
 @Processing(Processing.Type.ALL)
 public class ReduceStateByKeyTest extends AbstractOperatorTest {
 
-  static class WPair<W, K, V> extends Pair<K, V> {
-    private final W window;
-    WPair(W window, K first, V second) {
-      super(first, second);
-      this.window = window;
-    }
-    public W getWindow() {
-      return window;
-    }
-  }
-
-  static class SortState extends State<Integer, Integer> {
+  static class SortState implements State<Integer, Integer> {
 
     final ListStorage<Integer> data;
 
-    SortState(        
-        Context<Integer> c,
-        StorageProvider storageProvider) {
-
-      super(c, storageProvider);
+    SortState(StorageProvider storageProvider, Collector<Integer> c) {
       this.data = storageProvider.getListStorage(
           ListStorageDescriptor.of("data", Integer.class));
     }
@@ -98,12 +83,21 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
     }
 
     @Override
-    public void flush() {
+    public void flush(Collector<Integer> context) {
       List<Integer> list = Lists.newArrayList(data.get());
       Collections.sort(list);
       for (Integer i : list) {
-        this.getContext().collect(i);
+        context.collect(i);
       }
+    }
+
+    protected int flush_(Collector<Integer> context) {
+      List<Integer> list = Lists.newArrayList(data.get());
+      Collections.sort(list);
+      for (Integer i : list) {
+        context.collect(i);
+      }
+      return list.size();
     }
 
     @Override
@@ -111,19 +105,64 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
       data.clear();
     }
 
-    static SortState combine(Iterable<SortState> states) {
-      SortState ret = null;
-      for (SortState state : states) {
-        if (ret == null) {
-          ret = new SortState(
-              state.getContext(),
-              state.getStorageProvider());
-        }
-        ret.data.addAll(state.data.get());
+    static void combine(SortState target, Iterable<SortState> others) {
+      for (SortState other : others) {
+        target.data.addAll(other.data.get());
       }
-      return ret;
     }
+  }
 
+  static class CountingSortState extends SortState {
+    public CountingSortState(StorageProvider storageProvider, Collector<Integer> c) {
+      super(storageProvider, c);
+    }
+    @Override
+    public void flush(Collector<Integer> context) {
+      int num = flush_(context);
+      context.getCounter("flushed").increment(num);
+    }
+  }
+
+  @Test
+  public void testAccumulators() {
+    execute(new AbstractTestCase<Integer, Pair<String, Integer>>() {
+      @Override
+      protected Dataset<Pair<String, Integer>> getOutput(Dataset<Integer> input) {
+        return ReduceStateByKey.of(input)
+            .keyBy(e -> "")
+            .valueBy(e -> e)
+            .stateFactory(CountingSortState::new)
+            .mergeStatesBy((target, others) -> {})
+            .setNumPartitions(1)
+            .setPartitioner(e -> 0)
+            .output();
+      }
+
+      @Override
+      protected Partitions<Integer> getInput() {
+        return Partitions.add(9, 8, 7, 5, 4).add(1, 2, 6, 3, 5).build();
+      }
+
+      @Override
+      public int getNumOutputPartitions() {
+        return 1;
+      }
+
+      @Override
+      public void validate(Partitions<Pair<String, Integer>> partitions) {
+        List<Pair<String, Integer>> first = partitions.get(0);
+        assertEquals(10, first.size());
+        List<Integer> values = first.stream().map(Pair::getSecond)
+            .collect(Collectors.toList());
+        assertEquals(Arrays.asList(1, 2, 3, 4, 5, 5, 6, 7, 8, 9), values);
+      }
+
+      @Override
+      public void validateAccumulators(SnapshotProvider snapshots) {
+        Map<String, Long> counters = snapshots.getCounterSnapshots();
+        assertEquals(Long.valueOf(10), counters.get("flushed"));
+      }
+    });
   }
 
   @Test
@@ -135,7 +174,7 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
             .keyBy(e -> "")
             .valueBy(e -> e)
             .stateFactory(SortState::new)
-            .combineStateBy(SortState::combine)
+            .mergeStatesBy(SortState::combine)
             .setNumPartitions(1)
             .setPartitioner(e -> 0)
             .output();
@@ -166,21 +205,21 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
 
   @Test
   public void testSortWindowed() {
-    execute(new AbstractTestCase<Integer, WPair<Integer, Integer, Integer>>() {
+    execute(new AbstractTestCase<Integer, Triple<Integer, Integer, Integer>>() {
       @Override
-      protected Dataset<WPair<Integer, Integer, Integer>> getOutput(Dataset<Integer> input) {
+      protected Dataset<Triple<Integer, Integer, Integer>> getOutput(Dataset<Integer> input) {
         Dataset<Pair<Integer, Integer>> output = ReduceStateByKey.of(input)
             .keyBy(e -> e % 3)
             .valueBy(e -> e)
             .stateFactory(SortState::new)
-            .combineStateBy(SortState::combine)
+            .mergeStatesBy(SortState::combine)
             .setNumPartitions(1)
             .setPartitioner(e -> 0)
             .windowBy(new ReduceByKeyTest.TestWindowing())
             .output();
         return FlatMap.of(output)
-            .using((UnaryFunctor<Pair<Integer, Integer>, WPair<Integer, Integer, Integer>>)
-                (elem, c) -> c.collect(new WPair<>(((IntWindow) c.getWindow()).getValue(), elem.getFirst(), elem.getSecond())))
+            .using((UnaryFunctor<Pair<Integer, Integer>, Triple<Integer, Integer, Integer>>)
+                (elem, c) -> c.collect(Triple.of(((IntWindow) c.getWindow()).getValue(), elem.getFirst(), elem.getSecond())))
             .output();
       }
 
@@ -200,15 +239,15 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
       }
 
       @Override
-      public void validate(Partitions<WPair<Integer, Integer, Integer>> partitions) {
+      public void validate(Partitions<Triple<Integer, Integer, Integer>> partitions) {
         assertEquals(1, partitions.size());
-        List<WPair<Integer, Integer, Integer>> first = partitions.get(0);
+        List<Triple<Integer, Integer, Integer>> first = partitions.get(0);
         assertEquals(12, first.size());
 
         // map (window, key) -> list(data)
-        Map<Pair<Integer, Integer>, List<WPair<Integer, Integer, Integer>>>
+        Map<Pair<Integer, Integer>, List<Triple<Integer, Integer, Integer>>>
             windowKeyMap = first.stream()
-            .collect(Collectors.groupingBy(p -> Pair.of(p.getWindow(), p.getKey())));
+            .collect(Collectors.groupingBy(p -> Pair.of(p.getFirst(), p.getSecond())));
 
         // two windows, three keys
         assertEquals(6, windowKeyMap.size());
@@ -237,35 +276,33 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
 
       }
 
-      List<Integer> flatten(List<WPair<Integer, Integer, Integer>> l) {
-        return l.stream().map(Pair::getSecond).collect(Collectors.toList());
+      List<Integer> flatten(List<Triple<Integer, Integer, Integer>> l) {
+        return l.stream().map(Triple::getThird).collect(Collectors.toList());
       }
     });
   }
 
   // ---------------------------------------------------------------------------------
 
-  private static class CountState extends State<String, Long> {
+  private static class CountState<IN> implements State<IN, Long> {
     final ValueStorage<Long> count;
-    CountState(Context<Long> context, StorageProvider storageProvider)
-    {
-      super(context, storageProvider);
+    CountState(StorageProvider storageProvider, Collector<Long> context) {
       this.count = storageProvider.getValueStorage(
           ValueStorageDescriptor.of("count-state", Long.class, 0L));
     }
 
     @Override
     @SuppressWarnings("unchecked")
-    public void add(String element) {
+    public void add(IN element) {
       count.set(count.get() + 1);
     }
 
     @Override
-    public void flush() {
-      getContext().collect(count.get());
+    public void flush(Collector<Long> context) {
+      context.collect(count.get());
     }
 
-    void add(CountState other) {
+    void add(CountState<IN> other) {
       count.set(count.get() + other.count.get());
     }
 
@@ -274,13 +311,10 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
       count.clear();
     }
 
-    public static CountState combine(Iterable<CountState> xs) {
-      Iterator<CountState> iter = xs.iterator();
-      CountState first = iter.next();
-      while (iter.hasNext()) {
-        first.add(iter.next());
+    public static <IN> void combine(CountState<IN> target, Iterable<CountState<IN>> others) {
+      for (CountState<IN> other : others) {
+        target.add(other);
       }
-      return first;
     }
   }
 
@@ -310,8 +344,8 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
         return ReduceStateByKey.of(input)
             .keyBy(e -> e.getFirst().charAt(0) - '0')
             .valueBy(Pair::getFirst)
-            .stateFactory((StateFactory<Long, CountState>) CountState::new)
-            .combineStateBy(CountState::combine)
+            .stateFactory((StateFactory<String, Long, CountState<String>>) CountState::new)
+            .mergeStatesBy(CountState::combine)
             // FIXME .timedBy(Pair::getSecond) and make the assertion in the validation phase stronger
             .windowBy(Count.of(3))
             .setNumPartitions(1)
@@ -345,13 +379,10 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
 
   // ---------------------------------------------------------------------------------
 
-  private static class AccState<VALUE> extends State<VALUE, VALUE> {
+  private static class AccState<VALUE> implements State<VALUE, VALUE> {
     final ListStorage<VALUE> vals;
     @SuppressWarnings("unchecked")
-    AccState(Context<VALUE> context,
-             StorageProvider storageProvider)
-    {
-      super(context, storageProvider);
+    AccState(StorageProvider storageProvider, Collector<VALUE> context) {
       vals = storageProvider.getListStorage(
           ListStorageDescriptor.of("vals", (Class) Object.class));
     }
@@ -362,9 +393,9 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
     }
 
     @Override
-    public void flush() {
+    public void flush(Collector<VALUE> context) {
       for (VALUE value : vals.get()) {
-        getContext().collect(value);
+        context.collect(value);
       }
     }
 
@@ -377,13 +408,11 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
       vals.clear();
     }
 
-    public static <VALUE> AccState<VALUE> combine(Iterable<AccState<VALUE>> xs) {
-      Iterator<AccState<VALUE>> iter = xs.iterator();
-      AccState<VALUE> first = iter.next();
-      while (iter.hasNext()) {
-        first.add(iter.next());
+    public static <VALUE>
+    void combine(AccState<VALUE> target, Iterable<AccState<VALUE>> others) {
+      for (AccState<VALUE> other : others) {
+        target.add(other);
       }
-      return first;
     }
   }
 
@@ -409,14 +438,14 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
       @Override
       protected Dataset<Triple<TimeInterval, Integer, String>>
       getOutput(Dataset<Pair<String, Integer>> input) {
+        input = AssignEventTime.of(input).using(e -> e.getSecond() * 1000L).output();
         Dataset<Pair<Integer, String>> reduced =
             ReduceStateByKey.of(input)
                 .keyBy(e -> e.getFirst().charAt(0) - '0')
                 .valueBy(Pair::getFirst)
-                .stateFactory((StateFactory<String, AccState<String>>) AccState::new)
-                .combineStateBy(AccState::combine)
-                .windowBy(Time.of(Duration.ofSeconds(5)),
-                        (Pair<String, Integer> e) -> e.getSecond() * 1_000L)
+                .stateFactory((StateFactory<String, String, AccState<String>>) AccState::new)
+                .mergeStatesBy(AccState::combine)
+                .windowBy(Time.of(Duration.ofSeconds(5)))
                 .setNumPartitions(1)
                 .output();
 
@@ -470,14 +499,14 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
 
       @Override
       protected Dataset<Triple<TimeInterval, Integer, String>> getOutput(Dataset<Pair<String, Integer>> input) {
+        input = AssignEventTime.of(input).using(e -> e.getSecond() * 1000L).output();
         Dataset<Pair<Integer, String>> reduced =
             ReduceStateByKey.of(input)
                 .keyBy(e -> e.getFirst().charAt(0) - '0')
                 .valueBy(e -> e.getFirst().substring(2))
-                .stateFactory((StateFactory<String, AccState<String>>) AccState::new)
-                .combineStateBy(AccState::combine)
-                .windowBy(TimeSliding.of(Duration.ofSeconds(10), Duration.ofSeconds(5)),
-                        (Pair<String, Integer> e) -> e.getSecond() * 1_000L)
+                .stateFactory((StateFactory<String, String, AccState<String>>) AccState::new)
+                .mergeStatesBy(AccState::combine)
+                .windowBy(TimeSliding.of(Duration.ofSeconds(10), Duration.ofSeconds(5)))
                 .setNumPartitions(2)
                 .setPartitioner(element -> {
                   assert element == 1 || element == 2;
@@ -549,14 +578,14 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
       @Override
       protected Dataset<Triple<TimeInterval, Integer, String>>
       getOutput(Dataset<Pair<String, Integer>> input) {
+        input = AssignEventTime.of(input).using(e -> e.getSecond() * 1000L).output();
         Dataset<Pair<Integer, String>> reduced =
             ReduceStateByKey.of(input)
                 .keyBy(e -> e.getFirst().charAt(0) - '0')
                 .valueBy(Pair::getFirst)
-                .stateFactory((StateFactory<String, AccState<String>>) AccState::new)
-                .combineStateBy(AccState::combine)
-                .windowBy(Session.of(Duration.ofSeconds(5)),
-                        (Pair<String, Integer> e) -> e.getSecond() * 1_000L)
+                .stateFactory((StateFactory<String, String, AccState<String>>) AccState::new)
+                .mergeStatesBy(AccState::combine)
+                .windowBy(Session.of(Duration.ofSeconds(5)))
                 .setNumPartitions(1)
                 .output();
 
@@ -652,14 +681,14 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
       protected Dataset<Integer> getOutput(Dataset<Pair<Integer, Long>> input) {
         // ~ this operator is supposed to emit elements internally with a timestamp
         // which equals the end of the time window
+        input = AssignEventTime.of(input).using(Pair::getSecond).output();
         Dataset<Pair<String, Integer>> reduced =
             ReduceStateByKey.of(input)
                 .keyBy(e -> "")
                 .valueBy(Pair::getFirst)
                 .stateFactory(ReduceByKeyTest.SumState::new)
-                .combineStateBy(ReduceByKeyTest.SumState::combine)
-                .windowBy(Time.of(Duration.ofSeconds(5)),
-                          (ExtractEventTime<Pair<String, Integer>>) Pair::getSecond)
+                .mergeStatesBy(ReduceByKeyTest.SumState::combine)
+                .windowBy(Time.of(Duration.ofSeconds(5)))
                 .output();
         // ~ now use a custom windowing with a trigger which does
         // the assertions subject to this test (use RSBK which has to
@@ -669,7 +698,7 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
                 .keyBy(Pair::getFirst)
                 .valueBy(Pair::getSecond)
                 .stateFactory(ReduceByKeyTest.SumState::new)
-                .combineStateBy(ReduceByKeyTest.SumState::combine)
+                .mergeStatesBy(ReduceByKeyTest.SumState::combine)
                 .windowBy(new TimeAssertingWindowing<>())
                 .output();
         return FlatMap.of(output)
@@ -689,5 +718,86 @@ public class ReduceStateByKeyTest extends AbstractOperatorTest {
         Assert.assertEquals(asList(4, 6), Util.sorted(partitions.get(0), Comparator.naturalOrder()));
       }
     });
+  }
+
+  // ------------------------------------
+
+  @Test
+  public void testReduceStateByKeyWithWrongHashCodeImpl() {
+    execute(new AbstractTestCase<Pair<Word, Long>, Pair<Word, Long>>() {
+
+      @Override
+      protected Dataset<Pair<Word, Long>> getOutput(Dataset<Pair<Word, Long>> input) {
+        input = AssignEventTime.of(input).using(Pair::getSecond).output();
+        return ReduceStateByKey.of(input)
+                .keyBy(Pair::getFirst)
+                .valueBy(Pair::getFirst)
+                .stateFactory((StateFactory<Word, Long, CountState<Word>>) CountState::new)
+                .mergeStatesBy(CountState::combine)
+                .windowBy(Time.of(Duration.ofSeconds(1)))
+                .output();
+      }
+
+      @Override
+      protected Partitions<Pair<Word, Long>> getInput() {
+        return Partitions
+                .add(
+                        Pair.of(new Word("euphoria"), 300L),
+                        Pair.of(new Word("euphoria"), 600L),
+                        Pair.of(new Word("spark"), 900L),
+                        Pair.of(new Word("euphoria"), 1300L),
+                        Pair.of(new Word("flink"), 1600L),
+                        Pair.of(new Word("spark"), 1900L))
+                .build();
+      }
+
+      @Override
+      public int getNumOutputPartitions() {
+        return 2;
+      }
+
+      @Override
+      public void validate(Partitions<Pair<Word, Long>> partitions) {
+        assertEquals(2, partitions.size());
+        List<Pair<Word, Long>> data = partitions.get(0);
+        assertUnorderedEquals(Arrays.asList(
+                Pair.of(new Word("euphoria"), 2L), Pair.of(new Word("spark"), 1L),  // first window
+                Pair.of(new Word("euphoria"), 1L), Pair.of(new Word("spark"), 1L),  // second window
+                Pair.of(new Word("flink"), 1L)),
+                data);
+      }
+    });
+  }
+
+  /**
+   * String with invalid hash code implementation returning constant.
+   */
+  private static class Word {
+    private final String str;
+
+    public Word(String str) {
+      this.str = str;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) return true;
+      if (!(o instanceof Word)) return false;
+
+      Word word = (Word) o;
+
+      return !(str != null ? !str.equals(word.str) : word.str != null);
+
+    }
+
+    @Override
+    public int hashCode() {
+      return 42;
+    }
+
+    @Override
+    public String toString() {
+      return str;
+    }
   }
 }

@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import cz.seznam.euphoria.core.client.dataset.windowing.Time;
 import cz.seznam.euphoria.core.client.flow.Flow;
 import cz.seznam.euphoria.core.client.graph.DAG;
 import cz.seznam.euphoria.core.client.graph.Node;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.io.ListDataSink;
 import cz.seznam.euphoria.core.client.io.MockStreamDataSourceFactory;
 import cz.seznam.euphoria.core.client.io.StdoutSink;
@@ -77,8 +77,8 @@ public class FlowUnfolderTest {
         .output();
 
     Dataset<Pair<Object, Long>> output = Join.of(mapped, reduced)
-        .by(e -> e, Pair::getKey)
-        .using((Object l, Pair<Object, Long> r, Context<Long> c) -> c.collect(r.getSecond()))
+        .by(e -> e, Pair::getFirst)
+        .using((Object l, Pair<Object, Long> r, Collector<Long> c) -> c.collect(r.getSecond()))
         .windowBy(Time.of(Duration.ofSeconds(1)))
         .output();
 
@@ -160,8 +160,8 @@ public class FlowUnfolderTest {
         .output();
 
     Dataset<Pair<Object, Long>> output = Join.of(mapped, reduced)
-        .by(e -> e, Pair::getKey)
-        .using((Object l, Pair<Object, Long> r, Context<Long> c) -> {
+        .by(e -> e, Pair::getFirst)
+        .using((Object l, Pair<Object, Long> r, Collector<Long> c) -> {
           c.collect(r.getSecond());
         })
         .windowBy(Time.of(Duration.ofSeconds(1)))

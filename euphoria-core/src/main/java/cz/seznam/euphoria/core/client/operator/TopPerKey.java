@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,7 @@ import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.flow.Flow;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.graph.DAG;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.operator.state.State;
 import cz.seznam.euphoria.core.client.operator.state.StorageProvider;
 import cz.seznam.euphoria.core.client.operator.state.ValueStorage;
@@ -36,6 +36,26 @@ import javax.annotation.Nullable;
 
 import static java.util.Objects.requireNonNull;
 
+/**
+ * Emits top element for defined keys and windows. The elements are compared by comparable 
+ * objects extracted by user defined function applied on input elements.
+ * 
+ * Custom {@link Windowing} and {@link Partitioning} can be set, otherwise values from
+ * input operator are used.<p>
+ * 
+ * Example:
+ * 
+ * <pre>{@code
+ *  TopPerKey.of(elements)
+ *       .keyBy(e -> (byte) 0)
+ *       .valueBy(e -> e)
+ *       .scoreBy(Pair::getSecond)
+ *       .setNumPartitions(1)
+ *       .output();
+ * }</pre>
+ * 
+ * The examples above finds global maximum of all elements.
+ */
 @Derived(
     state = StateComplexity.CONSTANT,
     repartitions = 1
@@ -47,8 +67,7 @@ public class TopPerKey<
     TopPerKey<IN, KEY, VALUE, SCORE, W>> {
   
   private static final class MaxScored<V, C extends Comparable<C>>
-      extends State<Pair<V, C>, Pair<V, C>>
-      implements StateSupport.MergeFrom<MaxScored<V, C>> {
+      implements State<Pair<V, C>, Pair<V, C>>, StateSupport.MergeFrom<MaxScored<V, C>> {
 
     static final ValueStorageDescriptor<Pair> MAX_STATE_DESCR =
             ValueStorageDescriptor.of("max", Pair.class, Pair.of(null, null));
@@ -56,8 +75,7 @@ public class TopPerKey<
     final ValueStorage<Pair<V, C>> curr;
 
     @SuppressWarnings("unchecked")
-    MaxScored(Context<Pair<V, C>> context, StorageProvider storageProvider) {
-      super(context, storageProvider);
+    MaxScored(StorageProvider storageProvider) {
       curr = (ValueStorage) storageProvider.getValueStorage(MAX_STATE_DESCR);
     }
 
@@ -70,10 +88,10 @@ public class TopPerKey<
     }
 
     @Override
-    public void flush() {
+    public void flush(Collector<Pair<V, C>> context) {
       Pair<V, C> c = curr.get();
       if (c.getFirst() != null) {
-        getContext().collect(c);
+        context.collect(c);
       }
     }
 
@@ -91,19 +109,20 @@ public class TopPerKey<
     }
   }
 
-  public static class OfBuilder {
+  public static class OfBuilder implements Builders.Of {
     private final String name;
 
     OfBuilder(String name) {
       this.name = name;
     }
 
+    @Override
     public <IN> KeyByBuilder<IN> of(Dataset<IN> input) {
       return new KeyByBuilder<>(name, input);
     }
   }
 
-  public static class KeyByBuilder<IN> {
+  public static class KeyByBuilder<IN> implements Builders.KeyBy<IN> {
     private final String name;
     private final Dataset<IN> input;
 
@@ -112,6 +131,7 @@ public class TopPerKey<
       this.input = requireNonNull(input);
     }
 
+    @Override
     public <K> ValueByBuilder<IN, K> keyBy(UnaryFunction<IN, K> keyFn) {
       return new ValueByBuilder<>(name, input, requireNonNull(keyFn));
     }
@@ -158,7 +178,7 @@ public class TopPerKey<
 
   public static class WindowByBuilder<IN, K, V, S extends Comparable<S>>
       extends PartitioningBuilder<K, WindowByBuilder<IN, K, V, S>>
-      implements cz.seznam.euphoria.core.client.operator.OutputBuilder<Triple<K, V, S>>
+      implements Builders.WindowBy<IN>, Builders.Output<Triple<K, V, S>>
   {
     private String name;
     private final Dataset<IN> input;
@@ -181,30 +201,25 @@ public class TopPerKey<
       this.scoreFn = requireNonNull(scoreFn);
     }
 
+    @Override
     public <W extends Window>
     OutputBuilder<IN, K, V, S, W>
     windowBy(Windowing<IN, W> windowing) {
-      return windowBy(windowing, null);
-    }
-
-    public <W extends Window>
-    OutputBuilder<IN, K, V, S, W>
-    windowBy(Windowing<IN, W> windowing, ExtractEventTime<IN> eventTimeAssigner) {
       return new OutputBuilder<>(name, input, keyFn, valueFn,
-              scoreFn, this, requireNonNull(windowing), eventTimeAssigner);
+          scoreFn, this, requireNonNull(windowing));
     }
 
     @Override
     public Dataset<Triple<K, V, S>> output() {
       return new OutputBuilder<>(
-          name, input, keyFn, valueFn, scoreFn, this, null, null).output();
+          name, input, keyFn, valueFn, scoreFn, this, null).output();
     }
   }
 
   public static class OutputBuilder<
       IN, K, V, S extends Comparable<S>, W extends Window>
       extends PartitioningBuilder<K, OutputBuilder<IN, K, V, S, W>>
-      implements cz.seznam.euphoria.core.client.operator.OutputBuilder<Triple<K, V, S>>
+      implements Builders.Output<Triple<K, V, S>>
   {
     private final String name;
     private final Dataset<IN> input;
@@ -213,8 +228,6 @@ public class TopPerKey<
     private final UnaryFunction<IN, S> scoreFn;
     @Nullable
     private final Windowing<IN, W> windowing;
-    @Nullable
-    private final ExtractEventTime<IN> eventTimeAssigner;
 
     OutputBuilder(String name,
                   Dataset<IN> input,
@@ -222,8 +235,7 @@ public class TopPerKey<
                   UnaryFunction<IN, V> valueFn,
                   UnaryFunction<IN, S> scoreFn,
                   PartitioningBuilder<K, ?> partitioning,
-                  @Nullable Windowing<IN, W> windowing,
-                  @Nullable ExtractEventTime<IN> eventTimeAssigner) {
+                  @Nullable Windowing<IN, W> windowing) {
 
       super(partitioning);
 
@@ -233,7 +245,6 @@ public class TopPerKey<
       this.valueFn = requireNonNull(valueFn);
       this.scoreFn = requireNonNull(scoreFn);
       this.windowing = windowing;
-      this.eventTimeAssigner = eventTimeAssigner;
     }
 
     @Override
@@ -241,16 +252,36 @@ public class TopPerKey<
       Flow flow = input.getFlow();
       TopPerKey<IN, K, V, S, W> top =
           new TopPerKey<>(flow, name, input, keyFn, valueFn,
-                  scoreFn, getPartitioning(), windowing, eventTimeAssigner);
+                  scoreFn, getPartitioning(), windowing);
       flow.add(top);
       return top.output();
     }
   }
 
-  public static <I> KeyByBuilder<I> of(Dataset<I> input) {
+  /**
+   * Starts building a nameless {@link TopPerKey} operator to process
+   * the given input dataset.
+   *
+   * @param <IN> the type of elements of the input dataset
+   *
+   * @param input the input data set to be processed
+   *
+   * @return a builder to complete the setup of the new operator
+   *
+   * @see #named(String)
+   * @see OfBuilder#of(Dataset)
+   */
+  public static <IN> KeyByBuilder<IN> of(Dataset<IN> input) {
     return new KeyByBuilder<>("TopPerKey", input);
   }
 
+  /**
+   * Starts building a named {@link TopPerKey} operator.
+   *
+   * @param name a user provided name of the new operator to build
+   *
+   * @return a builder to complete the setup of the new operator
+   */
   public static OfBuilder named(String name) {
     return new OfBuilder(name);
   }
@@ -267,9 +298,8 @@ public class TopPerKey<
             UnaryFunction<IN, VALUE> valueFn,
             UnaryFunction<IN, SCORE> scoreFn,
             Partitioning<KEY> partitioning,
-            @Nullable Windowing<IN, W> windowing,
-            @Nullable ExtractEventTime<IN> eventTimeAssigner) {
-    super(name, flow, input, keyFn, windowing, eventTimeAssigner, partitioning);
+            @Nullable Windowing<IN, W> windowing) {
+    super(name, flow, input, keyFn, windowing, partitioning);
     
     this.valueFn = valueFn;
     this.scoreFn = scoreFn;
@@ -288,19 +318,18 @@ public class TopPerKey<
   public DAG<Operator<?, ?>> getBasicOps() {
     Flow flow = getFlow();
 
-    StateSupport.MergeFromStateCombiner<MaxScored<VALUE, SCORE>> stateCombiner
-            = new StateSupport.MergeFromStateCombiner<>();
-    ReduceStateByKey<IN, IN, IN, KEY, Pair<VALUE, SCORE>, KEY, Pair<VALUE, SCORE>,
+    StateSupport.MergeFromStateMerger<Pair<VALUE, SCORE>, Pair<VALUE, SCORE>, MaxScored<VALUE, SCORE>>
+            stateCombiner = new StateSupport.MergeFromStateMerger<>();
+    ReduceStateByKey<IN, KEY, Pair<VALUE, SCORE>, Pair<VALUE, SCORE>,
         MaxScored<VALUE, SCORE>, W>
         reduce =
         new ReduceStateByKey<>(getName() + "::ReduceStateByKey", flow, input,
-            keyExtractor,
-            e -> Pair.of(valueFn.apply(e), scoreFn.apply(e)),
-            windowing,
-            eventTimeAssigner,
-            MaxScored::new,
-            stateCombiner,
-            partitioning);
+                keyExtractor,
+                e -> Pair.of(valueFn.apply(e), scoreFn.apply(e)),
+                windowing,
+                (StorageProvider storageProvider, Collector<Pair<VALUE, SCORE>> ctx) -> new MaxScored<>(storageProvider),
+                stateCombiner,
+                partitioning);
 
     MapElements<Pair<KEY, Pair<VALUE, SCORE>>, Triple<KEY, VALUE, SCORE>>
         format =

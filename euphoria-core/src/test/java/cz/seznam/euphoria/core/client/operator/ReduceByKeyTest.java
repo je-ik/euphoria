@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -55,7 +55,6 @@ public class ReduceByKeyTest {
     assertNotNull(reduce.reducer);
     assertEquals(reduced, reduce.output());
     assertSame(windowing, reduce.getWindowing());
-    assertNull(reduce.getEventTimeAssigner());
 
     // default partitioning used
     assertTrue(reduce.getPartitioning().hasDefaultPartitioner());
@@ -102,12 +101,11 @@ public class ReduceByKeyTest {
             .keyBy(s -> s)
             .valueBy(s -> 1L)
             .combineBy(n -> StreamSupport.stream(n.spliterator(), false).mapToLong(Long::new).sum())
-            .windowBy(Time.of(Duration.ofHours(1)), (s -> 0L))
+            .windowBy(Time.of(Duration.ofHours(1)))
             .output();
 
     ReduceByKey reduce = (ReduceByKey) flow.operators().iterator().next();
     assertTrue(reduce.getWindowing() instanceof Time);
-    assertNotNull(reduce.getEventTimeAssigner());
   }
 
   @Test

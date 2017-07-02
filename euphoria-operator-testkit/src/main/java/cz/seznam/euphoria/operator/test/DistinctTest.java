@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package cz.seznam.euphoria.operator.test;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.dataset.windowing.Time;
+import cz.seznam.euphoria.core.client.operator.AssignEventTime;
 import cz.seznam.euphoria.core.client.operator.Distinct;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.operator.test.junit.AbstractOperatorTest;
@@ -93,9 +94,10 @@ public class DistinctTest extends AbstractOperatorTest {
 
       @Override
       protected Dataset<Integer> getOutput(Dataset<Pair<Integer, Long>> input) {
+        input = AssignEventTime.of(input).using(Pair::getSecond).output();
         return Distinct.of(input)
             .mapped(Pair::getFirst)
-            .windowBy(Time.of(Duration.ofSeconds(1)), Pair::getSecond)
+            .windowBy(Time.of(Duration.ofSeconds(1)))
             .output();
       }
 
@@ -134,11 +136,12 @@ public class DistinctTest extends AbstractOperatorTest {
 
       @Override
       protected Dataset<Integer> getOutput(Dataset<Pair<Integer, Long>> input) {
+        input = AssignEventTime.of(input).using(Pair::getSecond).output();
         return Distinct.of(input)
             .mapped(Pair::getFirst)
             .setNumPartitions(2)
             .setPartitioner(e -> e)
-            .windowBy(Time.of(Duration.ofSeconds(1)), Pair::getSecond)
+            .windowBy(Time.of(Duration.ofSeconds(1)))
             .output();
       }
 

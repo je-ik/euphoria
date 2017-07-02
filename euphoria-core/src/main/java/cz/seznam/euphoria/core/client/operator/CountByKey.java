@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,31 +40,37 @@ public class CountByKey<IN, KEY, W extends Window>
     extends StateAwareWindowWiseSingleInputOperator<
         IN, IN, IN, KEY, Pair<KEY, Long>, W, CountByKey<IN, KEY, W>> {
 
-  public static class OfBuilder {
+  public static class OfBuilder implements Builders.Of {
     private final String name;
 
     OfBuilder(String name) {
       this.name = name;
     }
-
-    public <IN> ByBuilder<IN> of(Dataset<IN> input) {
-      return new ByBuilder<>(name, input);
+    
+    @Override
+    public <IN> KeyByBuilder<IN> of(Dataset<IN> input) {
+      return new KeyByBuilder<>(name, input);
     }
   }
 
-  public static class ByBuilder<IN> {
+  public static class KeyByBuilder<IN> implements Builders.KeyBy<IN> {
     private final String name;
     private final Dataset<IN> input;
-    ByBuilder(String name, Dataset<IN> input) {
+    
+    KeyByBuilder(String name, Dataset<IN> input) {
       this.name = Objects.requireNonNull(name);
       this.input = Objects.requireNonNull(input);
     }
+    
+    @Override
     public <KEY> WindowingBuilder<IN, KEY> keyBy(UnaryFunction<IN, KEY> keyExtractor) {
       return new WindowingBuilder<>(name, input, keyExtractor);
     }
   }
+  
   public static class WindowingBuilder<IN, KEY>
-          extends PartitioningBuilder<KEY, WindowingBuilder<IN, KEY>> {
+          extends PartitioningBuilder<KEY, WindowingBuilder<IN, KEY>>
+          implements Builders.WindowBy<IN>, Builders.Output<Pair<KEY, Long>> {
     private final String name;
     private final Dataset<IN> input;
     private final UnaryFunction<IN, KEY> keyExtractor;
@@ -78,37 +84,32 @@ public class CountByKey<IN, KEY, W extends Window>
       this.keyExtractor = Objects.requireNonNull(keyExtractor);
     }
 
-    public <W extends Window> OutputBuilder<IN, KEY, W>
-    windowBy(Windowing<IN, W> windowing, ExtractEventTime<IN> eventTimeAssigner) {
-      return new OutputBuilder<>(name, input, keyExtractor, windowing, eventTimeAssigner, this);
-    }
-
+    @Override
     public <W extends Window> OutputBuilder<IN, KEY, W>
     windowBy(Windowing<IN, W> windowing) {
-      return windowBy(windowing, null);
+      return new OutputBuilder<>(name, input, keyExtractor, windowing, this);
     }
 
+    @Override
     public Dataset<Pair<KEY, Long>> output() {
-      return windowBy(null, null).output();
+      return windowBy(null).output();
     }
   }
+  
   public static class OutputBuilder<IN, KEY, W extends Window>
-          extends PartitioningBuilder<KEY, OutputBuilder<IN, KEY, W>> {
+          extends PartitioningBuilder<KEY, OutputBuilder<IN, KEY, W>>
+          implements Builders.Output<Pair<KEY, Long>> {
 
     private final String name;
     private final Dataset<IN> input;
     private final UnaryFunction<IN, KEY> keyExtractor;
     @Nullable
     private final Windowing<IN, W> windowing;
-    @Nullable
-    private final ExtractEventTime<IN> eventTimeAssigner;
-
 
     OutputBuilder(String name,
                   Dataset<IN> input,
                   UnaryFunction<IN, KEY> keyExtractor,
                   @Nullable Windowing<IN, W> windowing,
-                  @Nullable ExtractEventTime<IN> eventTimeAssigner,
                   PartitioningBuilder<KEY, ?> partitioning) {
 
       //initialize partitioning
@@ -118,23 +119,42 @@ public class CountByKey<IN, KEY, W extends Window>
       this.input = Objects.requireNonNull(input);
       this.keyExtractor = Objects.requireNonNull(keyExtractor);
       this.windowing = windowing;
-      this.eventTimeAssigner = eventTimeAssigner;
     }
 
+    @Override
     public Dataset<Pair<KEY, Long>> output() {
       Flow flow = input.getFlow();
       CountByKey<IN, KEY, W> count = new CountByKey<>(
-              name, flow, input, keyExtractor,
-              windowing, eventTimeAssigner, getPartitioning());
+              name, flow, input, keyExtractor, windowing, getPartitioning());
       flow.add(count);
       return count.output();
     }
   }
 
-  public static <IN> ByBuilder<IN> of(Dataset<IN> input) {
-    return new ByBuilder<>("CountByKey", input);
+  /**
+   * Starts building a nameless {@link CountByKey} operator to process
+   * the given input dataset.
+   *
+   * @param <IN> the type of elements of the input dataset
+   *
+   * @param input the input data set to be processed
+   *
+   * @return a builder to complete the setup of the new operator
+   *
+   * @see #named(String)
+   * @see OfBuilder#of(Dataset)
+   */
+  public static <IN> KeyByBuilder<IN> of(Dataset<IN> input) {
+    return new KeyByBuilder<>("CountByKey", input);
   }
 
+  /**
+   * Starts building a named {@link CountByKey} operator.
+   *
+   * @param name a user provided name of the new operator to build
+   *
+   * @return a builder to complete the setup of the new operator
+   */
   public static OfBuilder named(String name) {
     return new OfBuilder(name);
   }
@@ -144,10 +164,9 @@ public class CountByKey<IN, KEY, W extends Window>
              Dataset<IN> input,
              UnaryFunction<IN, KEY> extractor,
              @Nullable Windowing<IN, W> windowing,
-             @Nullable ExtractEventTime<IN> eventTimeAssigner,
              Partitioning<KEY> partitioning) {
 
-    super(name, flow, input, extractor, windowing, eventTimeAssigner,  partitioning);
+    super(name, flow, input, extractor, windowing, partitioning);
   }
 
   @Override
@@ -159,7 +178,6 @@ public class CountByKey<IN, KEY, W extends Window>
             keyExtractor,
             e -> 1L,
             windowing,
-            eventTimeAssigner,
             partitioning);
     return DAG.of(sum);
   }

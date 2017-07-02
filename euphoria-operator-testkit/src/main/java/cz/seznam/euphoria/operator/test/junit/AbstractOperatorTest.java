@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,8 @@ import cz.seznam.euphoria.core.client.io.ListDataSink;
 import cz.seznam.euphoria.core.client.io.ListDataSource;
 import cz.seznam.euphoria.core.executor.Executor;
 import cz.seznam.euphoria.core.util.Settings;
+import cz.seznam.euphoria.operator.test.accumulators.SingleJvmAccumulatorProvider;
+import cz.seznam.euphoria.operator.test.accumulators.SnapshotProvider;
 import cz.seznam.euphoria.operator.test.junit.Processing.Type;
 import cz.seznam.euphoria.shaded.guava.com.google.common.base.Preconditions;
 
@@ -75,8 +77,18 @@ public abstract class AbstractOperatorTest implements Serializable {
      */
     void validate(Partitions<T> partitions);
 
+    /**
+     * Validate accumulators given a provider capturing the accumulated values.
+     *
+     * @param snapshots the provider of the accumulated values
+     */
+    default void validateAccumulators(SnapshotProvider snapshots) {}
+
     /** @return the number of runs for the test */
     default int getNumRuns() { return 1; }
+
+    /** @return test specific settings to be applied to the test flow. */
+    default Settings getSettings() { return new Settings(); }
   }
 
   /**
@@ -200,12 +212,17 @@ public abstract class AbstractOperatorTest implements Serializable {
     Preconditions.checkNotNull(executor);
     Preconditions.checkNotNull(processing);
 
+    SingleJvmAccumulatorProvider.Factory accs = SingleJvmAccumulatorProvider.Factory.get();
+    executor.setAccumulatorProvider(accs);
+
     // execute tests for each of processing types
     assertEquals(1, processing.asList().size());
     for (Processing.Type proc: processing.asList()) {
       for (int i = 0; i < tc.getNumRuns(); i++) {
+        accs.clear();
+
         ListDataSink<?> sink = ListDataSink.get(tc.getNumOutputPartitions());
-        Flow flow = Flow.create(tc.toString());
+        Flow flow = Flow.create(tc.toString(), tc.getSettings());
         Dataset output = tc.getOutput(flow, proc == Type.BOUNDED);
         // skip if output is not supported for the processing type
         output.persist(sink);
@@ -216,6 +233,7 @@ public abstract class AbstractOperatorTest implements Serializable {
         }
         Partitions<?> partitions = new Partitions<>(sink.getOutputs());
         tc.validate(partitions);
+        tc.validateAccumulators(accs);
       }
     }
   }

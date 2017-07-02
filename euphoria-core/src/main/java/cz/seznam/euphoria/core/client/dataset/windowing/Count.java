@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ import static java.util.Collections.singleton;
 /**
  * Count tumbling windowing.
  */
-public final class Count<T> implements Windowing<T, Batch.BatchWindow> {
+public final class Count<T> implements Windowing<T, GlobalWindowing.Window> {
 
   private final int maxCount;
 
@@ -32,12 +32,12 @@ public final class Count<T> implements Windowing<T, Batch.BatchWindow> {
   }
 
   @Override
-  public Iterable<Batch.BatchWindow> assignWindowsToElement(WindowedElement<?, T> el) {
-    return singleton(Batch.BatchWindow.get());
+  public Iterable<GlobalWindowing.Window> assignWindowsToElement(WindowedElement<?, T> el) {
+    return singleton(GlobalWindowing.Window.get());
   }
 
   @Override
-  public Trigger<Batch.BatchWindow> getTrigger() {
+  public Trigger<GlobalWindowing.Window> getTrigger() {
     return new CountTrigger<>(maxCount);
   }
 

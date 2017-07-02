@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,14 +25,21 @@ import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.flow.Flow;
 import cz.seznam.euphoria.core.client.functional.CombinableReduceFunction;
 import cz.seznam.euphoria.core.client.functional.ReduceFunction;
+import cz.seznam.euphoria.core.client.functional.ReduceFunctor;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.graph.DAG;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.util.Pair;
 
 import javax.annotation.Nullable;
 
 /**
- * Reduce all elements in window.
+ * Reduces all elements in a window. The operator corresponds to
+ * {@link ReduceByKey} with the same key for all elements, so the actual key
+ * is defined only by window.<p>
+ * 
+ * Custom {@link Windowing} and {@link Partitioning} can be set, otherwise
+ * values from input operator are used.
  */
 @Derived(
     state = StateComplexity.CONSTANT_IF_COMBINABLE,
@@ -44,11 +51,15 @@ public class ReduceWindow<
         IN, IN, IN, Byte, OUT, W,
             ReduceWindow<IN, VALUE, OUT, W>> {
   
-  public static class OfBuilder {
+  public static class OfBuilder implements Builders.Of {
+    
     final String name;
+    
     OfBuilder(String name) {
       this.name = name;
     }
+    
+    @Override
     public <T> ValueBuilder<T> of(Dataset<T> input) {
       return new ValueBuilder<>(name, input);
     }
@@ -90,30 +101,51 @@ public class ReduceWindow<
     }
     public <OUT> OutputBuilder<T, VALUE, OUT> reduceBy(
         ReduceFunction<VALUE, OUT> reducer) {
+      return reduceBy((Iterable<VALUE> in, Collector<OUT> ctx) -> {
+        ctx.collect(reducer.apply(in));
+      });
+    }
+    public <OUT> OutputBuilder<T, VALUE, OUT> reduceBy(
+        ReduceFunctor<VALUE, OUT> reducer) {
       return new OutputBuilder<>(name, input, valueExtractor, reducer);
     }
     public OutputBuilder<T, VALUE, VALUE> combineBy(
         CombinableReduceFunction<VALUE> reducer) {
-      return new OutputBuilder<>(name, input, valueExtractor, reducer);
+      return new OutputBuilder<>(
+          name, input, valueExtractor,
+          ReduceByKey.toReduceFunctor(reducer));
     }
   }
 
   public static class OutputBuilder<T, VALUE, OUT>
-      implements OptionalMethodBuilder<OutputBuilder<T, VALUE, OUT>> {
+      implements Builders.WindowBy<T>, OptionalMethodBuilder<OutputBuilder<T, VALUE, OUT>> {
     
     private final String name;
     private final Dataset<T> input;
     private final UnaryFunction<T, VALUE> valueExtractor;
-    private final ReduceFunction<VALUE, OUT> reducer;
+    private final ReduceFunctor<VALUE, OUT> reducer;
     private int numPartitions = -1;
     private Windowing<T, ?> windowing;
-    private ExtractEventTime<T> eventTimeAssigner;
+
 
     public OutputBuilder(
         String name,
         Dataset<T> input,
         UnaryFunction<T, VALUE> valueExtractor,
         ReduceFunction<VALUE, OUT> reducer) {
+      this(
+          name, input, valueExtractor,
+          (Iterable<VALUE> in, Collector<OUT> ctx) -> {
+            ctx.collect(reducer.apply(in));
+          });
+    }
+
+    public OutputBuilder(
+        String name,
+        Dataset<T> input,
+        UnaryFunction<T, VALUE> valueExtractor,
+        ReduceFunctor<VALUE, OUT> reducer) {
+      
       this.name = name;
       this.input = input;
       this.valueExtractor = valueExtractor;
@@ -124,37 +156,53 @@ public class ReduceWindow<
       Flow flow = input.getFlow();
       ReduceWindow<T, VALUE, OUT, ?> operator = new ReduceWindow<>(
           name, flow, input, valueExtractor,
-              (Windowing) windowing, eventTimeAssigner, reducer, numPartitions);
+              (Windowing) windowing, reducer, numPartitions);
       flow.add(operator);
       return operator.output();
     }
+    
+    @Override
     public <W extends Window> OutputBuilder<T, VALUE, OUT>
     windowBy(Windowing<T, W> windowing) {
-      return windowBy(windowing, null);
-    }
-    public <W extends Window> OutputBuilder<T, VALUE, OUT>
-    windowBy(Windowing<T, W> windowing, ExtractEventTime<T> eventTimeAssigner) {
       this.windowing = windowing;
-      this.eventTimeAssigner = eventTimeAssigner;
       return this;
     }
-
+    
     public OutputBuilder<T, VALUE, OUT> setNumPartitions(int numPartitions) {
       this.numPartitions = numPartitions;
       return this;
     }
   }
 
-  public static <T> ValueBuilder<T> of(Dataset<T> input) {
+  /**
+   * Starts building a nameless {@link ReduceWindow} operator to process
+   * the given input dataset.
+   *
+   * @param <IN> the type of elements of the input dataset
+   *
+   * @param input the input data set to be processed
+   *
+   * @return a builder to complete the setup of the new operator
+   *
+   * @see #named(String)
+   * @see OfBuilder#of(Dataset)
+   */
+  public static <IN> ValueBuilder<IN> of(Dataset<IN> input) {
     return new ValueBuilder<>("ReduceWindow", input);
   }
 
+  /**
+   * Starts building a named {@link ReduceWindow} operator.
+   *
+   * @param name a user provided name of the new operator to build
+   *
+   * @return a builder to complete the setup of the new operator
+   */
   public static OfBuilder named(String name) {
     return new OfBuilder(name);
   }
 
-
-  final ReduceFunction<VALUE, OUT> reducer;
+  final ReduceFunctor<VALUE, OUT> reducer;
   final UnaryFunction<IN, VALUE> valueExtractor;
 
   static final Byte B_ZERO = (byte) 0;
@@ -165,11 +213,10 @@ public class ReduceWindow<
           Dataset<IN> input,
           UnaryFunction<IN, VALUE> valueExtractor,
           @Nullable Windowing<IN, W> windowing,
-          @Nullable ExtractEventTime<IN> eventTimeAssigner,
-          ReduceFunction<VALUE, OUT> reducer,
+          ReduceFunctor<VALUE, OUT> reducer,
           int numPartitions) {
     
-    super(name, flow, input, e -> B_ZERO, windowing, eventTimeAssigner,
+    super(name, flow, input, e -> B_ZERO, windowing,
         new Partitioning<Byte>() {
           @Override
           public Partitioner<Byte> getPartitioner() {
@@ -184,27 +231,23 @@ public class ReduceWindow<
     this.valueExtractor = valueExtractor;
   }
 
-  public ReduceFunction<VALUE, OUT> getReducer() {
+  public ReduceFunctor<VALUE, OUT> getReducer() {
     return reducer;
   }
 
   @Override
   public DAG<Operator<?, ?>> getBasicOps() {
     // implement this operator via `ReduceByKey`
-    ReduceByKey<IN, IN, Byte, VALUE, Void, OUT, W> reduceByKey;
+    ReduceByKey<IN, Byte, VALUE, OUT, W> reduceByKey;
     reduceByKey = new ReduceByKey<>(
         getName() + "::ReduceByKey", getFlow(), input,
         getKeyExtractor(), valueExtractor,
-        windowing, eventTimeAssigner, reducer, partitioning);
-    Dataset<Pair<Void, OUT>> output = reduceByKey.output();
+        windowing, reducer, partitioning);
+    Dataset<Pair<Byte, OUT>> output = reduceByKey.output();
 
-    MapElements<Pair<Void, OUT>, OUT> format = new MapElements<>(
+    MapElements<Pair<Byte, OUT>, OUT> format = new MapElements<>(
         getName() + "::MapElements", getFlow(), output, Pair::getSecond);
 
     return DAG.of(reduceByKey, format);
   }
-
-
-
-
 }

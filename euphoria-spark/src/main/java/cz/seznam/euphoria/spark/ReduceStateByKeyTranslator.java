@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,24 +18,25 @@ package cz.seznam.euphoria.spark;
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
-import cz.seznam.euphoria.core.client.functional.CombinableReduceFunction;
-import cz.seznam.euphoria.core.client.functional.StateFactory;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
-import cz.seznam.euphoria.core.client.operator.ExtractEventTime;
 import cz.seznam.euphoria.core.client.operator.ReduceStateByKey;
 import cz.seznam.euphoria.core.client.operator.state.State;
+import cz.seznam.euphoria.core.client.operator.state.StateFactory;
+import cz.seznam.euphoria.core.client.operator.state.StateMerger;
+import cz.seznam.euphoria.core.client.operator.state.StorageProvider;
 import cz.seznam.euphoria.core.client.triggers.Trigger;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.core.executor.greduce.GroupReducer;
+import cz.seznam.euphoria.core.util.Settings;
 import org.apache.spark.HashPartitioner;
 import org.apache.spark.Partitioner;
+import org.apache.spark.SparkEnv;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.function.FlatMapFunction;
 import org.apache.spark.api.java.function.PairFlatMapFunction;
 import scala.Tuple2;
 
-import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -46,26 +47,36 @@ import java.util.Map;
 
 class ReduceStateByKeyTranslator implements SparkOperatorTranslator<ReduceStateByKey> {
 
+  static final String CFG_LIST_STORAGE_MAX_MEMORY_ELEMS_KEY = "euphoria.spark.batch.list-storage.max-memory-elements";
+  static final int CFG_LIST_STORAGE_MAX_MEMORY_ELEMS_DEFAULT = 1000;
+
+  private int listStorageMaxElements;
+
+  void loadSettings(Settings settings) {
+    this.listStorageMaxElements = settings.getInt(CFG_LIST_STORAGE_MAX_MEMORY_ELEMS_KEY, CFG_LIST_STORAGE_MAX_MEMORY_ELEMS_DEFAULT);
+  }
+
   @Override
   @SuppressWarnings("unchecked")
   public JavaRDD<?> translate(ReduceStateByKey operator,
                               SparkExecutorContext context) {
 
+    loadSettings(context.getSettings());
+
     final JavaRDD<SparkElement> input = (JavaRDD) context.getSingleInput(operator);
 
-    StateFactory<?, State> stateFactory = operator.getStateFactory();
-    CombinableReduceFunction<State> stateCombiner = operator.getStateCombiner();
+    StateFactory<?, ?, State<?, ?>> stateFactory = operator.getStateFactory();
+    StateMerger<?, ?, State<?, ?>> stateCombiner = operator.getStateMerger();
 
     final UnaryFunction keyExtractor = operator.getKeyExtractor();
     final UnaryFunction valueExtractor = operator.getValueExtractor();
-    final ExtractEventTime eventTimeAssigner = operator.getEventTimeAssigner();
     final Windowing windowing = operator.getWindowing() == null
             ? AttachedWindowing.INSTANCE
             : operator.getWindowing();
 
     // ~ extract key/value + timestamp from input elements and assign windows
     JavaPairRDD<KeyedWindow, Object> tuples = input.flatMapToPair(
-            new CompositeKeyExtractor(keyExtractor, valueExtractor, windowing, eventTimeAssigner));
+            new CompositeKeyExtractor(keyExtractor, valueExtractor, windowing));
 
     // ~ if merging windowing used all windows for one key need to be
     // processed in single task, otherwise they can be freely distributed
@@ -85,7 +96,10 @@ class ReduceStateByKeyTranslator implements SparkOperatorTranslator<ReduceStateB
             comparator);
 
     // ~ iterate through the sorted partition and incrementally reduce states
-    return sorted.mapPartitions(new StateReducer(windowing, stateFactory, stateCombiner));
+    return sorted.mapPartitions(
+            new StateReducer(windowing, stateFactory, stateCombiner,
+                    new SparkStorageProvider(SparkEnv.get().serializer(), listStorageMaxElements),
+                    new LazyAccumulatorProvider(context.getAccumulatorFactory(), context.getSettings())));
   }
 
   /**
@@ -117,26 +131,18 @@ class ReduceStateByKeyTranslator implements SparkOperatorTranslator<ReduceStateB
     private final UnaryFunction keyExtractor;
     private final UnaryFunction valueExtractor;
     private final Windowing windowing;
-    @Nullable
-    private final ExtractEventTime eventTimeAssigner;
 
     public CompositeKeyExtractor(UnaryFunction keyExtractor,
                                  UnaryFunction valueExtractor,
-                                 Windowing windowing,
-                                 @Nullable ExtractEventTime eventTimeAssigner) {
+                                 Windowing windowing) {
       this.keyExtractor = keyExtractor;
       this.valueExtractor = valueExtractor;
       this.windowing = windowing;
-      this.eventTimeAssigner = eventTimeAssigner;
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public Iterator<Tuple2<KeyedWindow, Object>> call(SparkElement wel) throws Exception {
-      if (eventTimeAssigner != null) {
-        wel.setTimestamp(eventTimeAssigner.extractTimestamp(wel.getElement()));
-      }
-
       Iterable<Window> windows = windowing.assignWindowsToElement(wel);
       List<Tuple2<KeyedWindow, Object>> out = new ArrayList<>();
       for (Window wid : windows) {
@@ -149,34 +155,38 @@ class ReduceStateByKeyTranslator implements SparkOperatorTranslator<ReduceStateB
     }
   }
 
-
   private static class StateReducer
           implements FlatMapFunction<Iterator<Tuple2<KeyedWindow, Object>>, SparkElement> {
 
     private final Windowing windowing;
     private final Trigger trigger;
-    private final StateFactory<?, State> stateFactory;
-    private final CombinableReduceFunction<State> stateCombiner;
-    private final SparkStorageProvider storageProvider;
+    private final StateFactory<?, ?, State<?, ?>> stateFactory;
+    private final StateMerger<?, ?, State<?, ?>> stateCombiner;
+    private final StorageProvider storageProvider;
+    private final LazyAccumulatorProvider accumulators;
 
     // mapping of [Key -> GroupReducer]
     private transient Map<Object, GroupReducer> activeReducers;
 
     public StateReducer(Windowing windowing,
-                        StateFactory<?, State> stateFactory,
-                        CombinableReduceFunction<State> stateCombiner) {
+                        StateFactory<?, ?, State<?, ?>> stateFactory,
+                        StateMerger<?, ?, State<?, ?>> stateCombiner,
+                        StorageProvider storageProvider,
+                        LazyAccumulatorProvider accumulators) {
       this.windowing = windowing;
       this.trigger = windowing.getTrigger();
       this.stateFactory = stateFactory;
       this.stateCombiner = stateCombiner;
-      this.storageProvider = new SparkStorageProvider();
+      this.storageProvider = storageProvider;
+      this.accumulators = accumulators;
     }
 
     @Override
     @SuppressWarnings("unchecked")
     public Iterator<SparkElement> call(Iterator<Tuple2<KeyedWindow, Object>> iterator) {
       activeReducers = new HashMap<>();
-      FunctionContextAsync<SparkElement<?, Pair<?, ?>>> context = new FunctionContextAsync<>();
+      FunctionCollectorAsync<SparkElement<?, Pair<?, ?>>> context =
+              new FunctionCollectorAsync<>(accumulators);
 
       // reduce states in separate thread
       context.runAsynchronously(() -> {
@@ -195,13 +205,16 @@ class ReduceStateByKeyTranslator implements SparkOperatorTranslator<ReduceStateB
 
           GroupReducer reducer = activeReducers.get(kw.key());
           if (reducer == null) {
-            reducer = new GroupReducer<>(stateFactory,
-                    SparkElement::new,
-                    stateCombiner,
-                    storageProvider,
-                    windowing,
-                    trigger,
-                    el -> context.collect((SparkElement) el));
+            reducer = new GroupReducer(
+                stateFactory,
+                stateCombiner,
+                storageProvider,
+                SparkElement::new,
+                windowing,
+                trigger,
+                el -> context.collect((SparkElement) el),
+                accumulators,
+                false);
 
             activeReducers.put(kw.key(), reducer);
           }
@@ -223,7 +236,5 @@ class ReduceStateByKeyTranslator implements SparkOperatorTranslator<ReduceStateB
       }
       activeReducers.clear();
     }
-
-
   }
 }

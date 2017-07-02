@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,7 +20,7 @@ import cz.seznam.euphoria.core.client.dataset.partitioning.HashPartitioner;
 import cz.seznam.euphoria.core.client.dataset.partitioning.HashPartitioning;
 import cz.seznam.euphoria.core.client.dataset.windowing.Time;
 import cz.seznam.euphoria.core.client.flow.Flow;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.util.Pair;
 import org.junit.Test;
 
@@ -40,7 +40,7 @@ public class JoinTest {
             .of(left, right)
             .by(String::length, String::length)
             //TODO It's sad the Collector type must be explicitly stated :-(
-            .using((String l, String r, Context<String> c) -> c.collect(l + r))
+            .using((String l, String r, Collector<String> c) -> c.collect(l + r))
             .output();
 
     assertEquals(flow, joined.getFlow());
@@ -53,7 +53,38 @@ public class JoinTest {
     assertNotNull(join.rightKeyExtractor);
     assertEquals(joined, join.output());
     assertNull(join.getWindowing());
-    assertNull(join.getEventTimeAssigner());
+    assertFalse(join.outer);
+
+    // default partitioning used
+    assertTrue(join.getPartitioning().hasDefaultPartitioner());
+    assertEquals(3, join.getPartitioning().getNumPartitions());
+  }
+
+  @Test
+  public void testBuild_WithCounters() {
+    Flow flow = Flow.create("TEST");
+    Dataset<String> left = Util.createMockDataset(flow, 2);
+    Dataset<String> right = Util.createMockDataset(flow, 3);
+
+    Dataset<Pair<Integer, String>> joined = Join.named("Join1")
+            .of(left, right)
+            .by(String::length, String::length)
+            .using((String l, String r, Collector<String> c) -> {
+              c.getCounter("my-counter").increment();
+              c.collect(l + r);
+            })
+            .output();
+
+    assertEquals(flow, joined.getFlow());
+    assertEquals(1, flow.size());
+
+    Join join = (Join) flow.operators().iterator().next();
+    assertEquals(flow, join.getFlow());
+    assertEquals("Join1", join.getName());
+    assertNotNull(join.leftKeyExtractor);
+    assertNotNull(join.rightKeyExtractor);
+    assertEquals(joined, join.output());
+    assertNull(join.getWindowing());
     assertFalse(join.outer);
 
     // default partitioning used
@@ -69,7 +100,7 @@ public class JoinTest {
 
     Dataset<Pair<Integer, String>> joined = Join.of(left, right)
             .by(String::length, String::length)
-            .using((String l, String r, Context<String> c) -> c.collect(l + r))
+            .using((String l, String r, Collector<String> c) -> c.collect(l + r))
             .output();
 
     Join join = (Join) flow.operators().iterator().next();
@@ -85,7 +116,7 @@ public class JoinTest {
     Dataset<Pair<Integer, String>> joined = Join.named("Join1")
             .of(left, right)
             .by(String::length, String::length)
-            .using((String l, String r, Context<String> c) -> c.collect(l + r))
+            .using((String l, String r, Collector<String> c) -> c.collect(l + r))
             .outer()
             .output();
 
@@ -102,13 +133,12 @@ public class JoinTest {
     Dataset<Pair<Integer, String>> joined = Join.named("Join1")
             .of(left, right)
             .by(String::length, String::length)
-            .using((String l, String r, Context<String> c) -> c.collect(l + r))
-            .windowBy(Time.of(Duration.ofHours(1)), s -> 0L, s -> 0L)
+            .using((String l, String r, Collector<String> c) -> c.collect(l + r))
+            .windowBy(Time.of(Duration.ofHours(1)))
             .output();
 
     Join join = (Join) flow.operators().iterator().next();
     assertTrue(join.getWindowing() instanceof Time);
-    assertNotNull(join.getEventTimeAssigner());
   }
 
   @Test
@@ -120,7 +150,7 @@ public class JoinTest {
     Dataset<Pair<Integer, String>> joined = Join.named("Join1")
             .of(left, right)
             .by(String::length, String::length)
-            .using((String l, String r, Context<String> c) -> c.collect(l + r))
+            .using((String l, String r, Collector<String> c) -> c.collect(l + r))
             .setPartitioning(new HashPartitioning<>(1))
             .windowBy(Time.of(Duration.ofHours(1)))
             .output();
@@ -130,7 +160,6 @@ public class JoinTest {
     assertTrue(join.getPartitioning().getPartitioner() instanceof HashPartitioner);
     assertEquals(1, join.getPartitioning().getNumPartitions());
     assertTrue(join.getWindowing() instanceof Time);
-    assertNull(join.getEventTimeAssigner());
   }
 
   @Test
@@ -142,7 +171,7 @@ public class JoinTest {
     Dataset<Pair<Integer, String>> joined = Join.named("Join1")
             .of(left, right)
             .by(String::length, String::length)
-            .using((String l, String r, Context<String> c) -> c.collect(l + r))
+            .using((String l, String r, Collector<String> c) -> c.collect(l + r))
             .windowBy(Time.of(Duration.ofHours(1)))
             .setPartitioner(new HashPartitioner<>())
             .setNumPartitions(5)

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
 
-    Copyright 2016 Seznam.cz, a.s.
+    Copyright 2016-2017 Seznam.cz, a.s.
 
     Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
@@ -22,7 +22,7 @@
   <parent>
     <groupId>cz.seznam.euphoria</groupId>
     <artifactId>euphoria-parent</artifactId>
-    <version>0.5.1-SNAPSHOT</version>
+    <version>0.8-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
 

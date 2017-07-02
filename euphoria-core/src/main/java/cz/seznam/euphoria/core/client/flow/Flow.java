@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,8 @@ import cz.seznam.euphoria.core.client.dataset.Datasets;
 import cz.seznam.euphoria.core.client.io.DataSink;
 import cz.seznam.euphoria.core.client.io.DataSource;
 import cz.seznam.euphoria.core.client.io.IORegistry;
+import cz.seznam.euphoria.core.client.operator.AssignEventTime;
+import cz.seznam.euphoria.core.client.operator.ExtractEventTime;
 import cz.seznam.euphoria.core.client.operator.Operator;
 import cz.seznam.euphoria.core.util.Settings;
 import org.slf4j.Logger;
@@ -38,6 +40,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -89,7 +92,7 @@ public class Flow implements Serializable {
       = new HashMap<>();
 
 
-  private Flow(@Nullable String name, Settings settings) {
+  protected Flow(@Nullable String name, Settings settings) {
     this.name = name == null ? "" : name;
     this.settings = cloneSettings(settings);
   }
@@ -332,6 +335,23 @@ public class Flow implements Serializable {
 
     sources.add(ret);
     return ret;
+  }
+
+  /**
+   * A convenience method to create a data set from the given source and
+   * assign the elements event time using the user defined function.
+   *
+   * @param <T> the type of elements of the created input data set
+   *
+   * @param source the data source to represent as a data set
+   * @param evtTimeFn the user defined event time extraction function
+   *
+   * @return a data set representing the specified source of data with assigned
+   *          event time assigned
+   */
+  public <T> Dataset<T> createInput(DataSource<T> source, ExtractEventTime<T> evtTimeFn) {
+    Dataset<T> input = createInput(source);
+    return AssignEventTime.of(input).using(Objects.requireNonNull(evtTimeFn)).output();
   }
 
   /**

@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -90,10 +90,8 @@ public interface Trigger<W extends Window> extends Serializable {
    *
    * @param window Resulting window from the merge operation.
    * @param ctx    Context instance
-   *
-   * @return instruction to the caller of how to continue processing the window
    */
-  TriggerResult onMerge(W window, TriggerContext.TriggerMergeContext ctx);
+  void onMerge(W window, TriggerContext.TriggerMergeContext ctx);
 
   /**
    * Represents result returned from scheduling methods.

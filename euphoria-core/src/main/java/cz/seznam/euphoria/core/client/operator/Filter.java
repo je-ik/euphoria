@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -33,42 +33,37 @@ import java.util.Objects;
 )
 public class Filter<IN> extends ElementWiseOperator<IN, IN> {
 
-  public static class Builder1 {
+  public static class OfBuilder implements Builders.Of {
     private final String name;
 
-    Builder1(String name) {
+    OfBuilder(String name) {
       this.name = name;
     }
 
-    public <IN> Builder2<IN> of(Dataset<IN> input) {
-      return new Builder2<>(name, input);
+    @Override
+    public <IN> ByBuilder<IN> of(Dataset<IN> input) {
+      return new ByBuilder<>(name, input);
     }
   }
 
-  public interface OutputBuilder<IN> {
-    Dataset<IN> output();
-  }
-
-  public interface ByBuilder<IN> {
-    OutputBuilder<IN> by(UnaryPredicate<IN> predicate);
-  }
-
-  public static class Builder2<IN> implements
-          ByBuilder<IN>,
-          OutputBuilder<IN>,
-      cz.seznam.euphoria.core.client.operator.OutputBuilder<IN>
-  {
+  public static class ByBuilder<IN> implements Builders.Output<IN> {
     private final String name;
     private final Dataset<IN> input;
     private UnaryPredicate<IN> predicate;
 
-    Builder2(String name, Dataset<IN> input) {
+    ByBuilder(String name, Dataset<IN> input) {
       this.name = Objects.requireNonNull(name);
       this.input = Objects.requireNonNull(input);
     }
 
-    @Override
-    public OutputBuilder<IN> by(UnaryPredicate<IN> predicate) {
+    /**
+     * Specifies the function that is capable of input elements filtering.
+     * 
+     * @param predicate the function that filters out elements if the return value 
+     *        for the element is false
+     * @return the next builder to complete the setup of the operator
+     */
+    public Builders.Output<IN> by(UnaryPredicate<IN> predicate) {
       this.predicate = Objects.requireNonNull(predicate);
       return this;
     }
@@ -83,12 +78,32 @@ public class Filter<IN> extends ElementWiseOperator<IN, IN> {
     }
   }
 
-  public static Builder1 named(String name) {
-    return new Builder1(name);
+  /**
+   * Starts building a nameless {@link Filter} operator to process
+   * the given input dataset.
+   *
+   * @param <IN> the type of elements of the input dataset
+   *
+   * @param input the input data set to be processed
+   *
+   * @return a builder to complete the setup of the new operator
+   *
+   * @see #named(String)
+   * @see OfBuilder#of(Dataset)
+   */
+  public static <IN> ByBuilder<IN> of(Dataset<IN> input) {
+    return new ByBuilder<>("Filter", input);
   }
 
-  public static <IN> ByBuilder<IN> of(Dataset<IN> input) {
-    return new Builder2<>("Filter", input);
+  /**
+   * Starts building a named {@link Filter} operator.
+   *
+   * @param name a user provided name of the new operator to build
+   *
+   * @return a builder to complete the setup of the new operator
+   */
+  public static OfBuilder named(String name) {
+    return new OfBuilder(name);
   }
 
   final UnaryPredicate<IN> predicate;
@@ -110,9 +125,6 @@ public class Filter<IN> extends ElementWiseOperator<IN, IN> {
           if (predicate.apply(elem)) {
             collector.collect(elem);
           }
-        }));
+        }, null));
   }
-
-
-
 }

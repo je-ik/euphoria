@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,8 +16,11 @@
 package cz.seznam.euphoria.flink.streaming;
 
 import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
+import cz.seznam.euphoria.core.client.operator.ExtractEventTime;
 import cz.seznam.euphoria.core.client.operator.FlatMap;
+import cz.seznam.euphoria.core.util.Settings;
 import cz.seznam.euphoria.flink.FlinkOperator;
+import cz.seznam.euphoria.flink.accumulators.FlinkAccumulatorFactory;
 import org.apache.flink.streaming.api.datastream.DataStream;
 
 class FlatMapTranslator implements StreamingOperatorTranslator<FlatMap> {
@@ -25,12 +28,20 @@ class FlatMapTranslator implements StreamingOperatorTranslator<FlatMap> {
   @Override
   @SuppressWarnings("unchecked")
   public DataStream<?> translate(FlinkOperator<FlatMap> operator,
-                                 StreamingExecutorContext context)
-  {
-    DataStream<?> input = context.getSingleInputStream(operator);
+                                 StreamingExecutorContext context) {
+    Settings settings = context.getSettings();
+    FlinkAccumulatorFactory accumulatorFactory = context.getAccumulatorFactory();
+
+    DataStream input = context.getSingleInputStream(operator);
     UnaryFunctor mapper = operator.getOriginalOperator().getFunctor();
+    ExtractEventTime evtTimeFn = operator.getOriginalOperator().getEventTimeExtractor();
+    if (evtTimeFn != null) {
+      input = input.assignTimestampsAndWatermarks(
+          new EventTimeAssigner(context.getAllowedLateness(), evtTimeFn))
+          .returns((Class) StreamingElement.class);
+    }
     return input
-        .flatMap(new StreamingUnaryFunctorWrapper<>(mapper))
+        .flatMap(new StreamingUnaryFunctorWrapper(mapper, accumulatorFactory, settings))
         .returns((Class) StreamingElement.class)
         .name(operator.getName())
         .setParallelism(operator.getParallelism());

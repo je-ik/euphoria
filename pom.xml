@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!--
 
-    Copyright 2016 Seznam.cz, a.s.
+    Copyright 2016-2017 Seznam.cz, a.s.
 
     Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
@@ -21,7 +21,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>cz.seznam.euphoria</groupId>
   <artifactId>euphoria-parent</artifactId>
-  <version>0.5.1-SNAPSHOT</version>
+  <version>0.8-SNAPSHOT</version>
   <packaging>pom</packaging>
   <inceptionYear>2016</inceptionYear>
 
@@ -81,6 +81,7 @@
   </developers>
 
   <modules>
+    <module>euphoria-beam</module>
     <module>euphoria-core</module>
     <module>euphoria-fluent</module>
     <module>euphoria-inmem</module>
@@ -183,33 +184,6 @@
         </plugin>
 
         <plugin>
-          <artifactId>maven-assembly-plugin</artifactId>
-          <version>2.4</version>
-          <configuration>
-            <archive>
-              <manifestSections>
-                <manifestSection>
-                  <name>Package-Metadata</name>
-                  <manifestEntries>
-                    <Build-Revision>${buildNumber}</Build-Revision>
-                    <Build-Branch>${scmBranch}</Build-Branch>
-                    <Build-Time>${maven.build.timestamp}</Build-Time>
-                    <Build-Host>${build.hostname}</Build-Host>
-                    <Build-User>${user.name}</Build-User>
-                    <Build-Java>${java.version}</Build-Java>
-                    <Build-OS>${os.name}</Build-OS>
-                    <Package-Vendor>${project.organization.name}</Package-Vendor>
-                    <Package-Group>${project.groupId}</Package-Group>
-                    <Package-Name>${project.artifactId}</Package-Name>
-                    <Package-Version>${project.version}</Package-Version>
-                  </manifestEntries>
-                </manifestSection>
-              </manifestSections>
-            </archive>
-          </configuration>
-        </plugin>
-
-        <plugin>
           <artifactId>maven-clean-plugin</artifactId>
           <version>2.5</version>
           <configuration>
@@ -241,7 +215,14 @@
         <plugin>
           <groupId>com.mycila</groupId>
           <artifactId>license-maven-plugin</artifactId>
-          <version>3.0</version>
+          <version>${license-maven-plugin.version}</version>
+          <dependencies>
+            <dependency>
+              <groupId>com.mycila</groupId>
+              <artifactId>license-maven-plugin-git</artifactId>
+              <version>${license-maven-plugin.version}</version>
+            </dependency>
+          </dependencies>
         </plugin>
       </plugins>
     </pluginManagement>
@@ -412,7 +393,10 @@
               </properties>
               <excludes>
                 <exclue>cd/**</exclue>
+                <exclude>**/.idea/**</exclude>
                 <exclude>**/README</exclude>
+                <exclude>**/NOTICE</exclude>
+                <exclude>**/LICENSE</exclude>
                 <exclude>src/test/resources/**</exclude>
                 <exclude>src/main/resources/**</exclude>
               </excludes>
@@ -440,7 +424,7 @@
             </configuration>
             <executions>
               <execution>
-                <phase>compile</phase>
+                <phase>process-classes</phase>
                 <goals>
                   <goal>check</goal>
                 </goals>
@@ -448,6 +432,11 @@
             </executions>
           </plugin>
 
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-shade-plugin</artifactId>
+            <version>2.4.3</version>
+          </plugin>
         </plugins>
       </build>
     </profile>
@@ -593,8 +582,9 @@
   </dependencyManagement>
 
   <properties>
-    <flink.version>1.2.0</flink.version>
+    <flink.version>1.2.1</flink.version>
     <spark.version>2.1.0</spark.version>
+    <license-maven-plugin.version>3.0</license-maven-plugin.version>
   </properties>
 
 </project>

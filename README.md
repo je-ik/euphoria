@@ -20,7 +20,7 @@ and new data sources or destinations - idealy just by configuration.
    the same code
  * Avoids vendor lock-in - migrating between different engines is
    matter of configuration
- * Declarative Java API using Java 8 Lamda expressions
+ * Declarative Java API using Java 8 Lambda expressions
  * Support for different notions of time (_event time, ingestion
    time_)
  * Flexible windowing (_Time, TimeSliding, Session, Count_)
@@ -33,7 +33,7 @@ The best way to use Euphoria is by adding the following Maven dependency to your
 <dependency>
   <groupId>cz.seznam.euphoria</groupId>
   <artifactId>euphoria-core</artifactId>
-  <version>0.5.0</version>
+  <version>0.7.0</version>
 </dependency>
 ```
 You may want to add additional modules, such as support of various engines or I/O data sources/sinks. For more details read the [Maven Dependencies](https://github.com/seznam/euphoria/wiki/Maven-dependencies) wiki page.
@@ -142,7 +142,18 @@ requests which do not pass the full build lifecycle as defined by the
 
 * Another source of documentation are deliberately simple examples
   maintained in the [euphoria-examples module](https://github.com/seznam/euphoria/tree/master/euphoria-examples).
+  
+## Contact us
 
+* Feel free to open an issue in the [issue tracker](https://github.com/seznam/euphoria/issues)
+* In case of questions you can contact us via [Gitter channel](https://gitter.im/euphoria-api/Lobby) or e-mail directly any of the project members
+
+### Euphoria Team
+
+* __Petr Novotník__ (xitep) - petr.novotnik@firma.seznam.cz
+* __Jan Lukavský__ (je-ik) - je.ik@seznam.cz
+* __Jaromír Vaněk__ (vanekjar) - vanek.jaromir@gmail.com
+* __Adam Horký__ (horkyada) - adam.horky@firma.seznam.cz
 
 ## License
 

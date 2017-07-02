@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
  */
 package cz.seznam.euphoria.core.client.dataset.windowing;
 
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.triggers.TimeTrigger;
 import cz.seznam.euphoria.core.client.triggers.Trigger;
 import cz.seznam.euphoria.shaded.guava.com.google.common.base.Preconditions;
@@ -44,7 +44,7 @@ public final class TimeSliding<T>
    * @throws ClassCastException if the context is not part of a
    *          time-sliding execution
    */
-  public static TimeInterval getLabel(Context<?> context) {
+  public static TimeInterval getLabel(Collector<?> context) {
     return (TimeInterval) context.getWindow();
   }
 

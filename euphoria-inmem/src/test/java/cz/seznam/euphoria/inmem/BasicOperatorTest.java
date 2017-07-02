@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,9 +22,10 @@ import cz.seznam.euphoria.core.client.dataset.windowing.TimeInterval;
 import cz.seznam.euphoria.core.client.flow.Flow;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.io.ListDataSink;
 import cz.seznam.euphoria.core.client.io.ListDataSource;
+import cz.seznam.euphoria.core.client.operator.AssignEventTime;
 import cz.seznam.euphoria.core.client.operator.Distinct;
 import cz.seznam.euphoria.core.client.operator.FlatMap;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
@@ -47,7 +48,9 @@ import java.util.stream.Stream;
 
 import static java.util.Arrays.asList;
 import static java.util.stream.Collectors.toList;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
 
 /**
  * Test basic operator functionality and ability to compile.
@@ -61,7 +64,7 @@ public class BasicOperatorTest {
   }
 
   private static <O> UnaryFunctor<String, O> toWords(UnaryFunction<String, O> f) {
-    return (String s, Context<O> c) -> {
+    return (String s, Collector<O> c) -> {
       for (String part : s.split(" ")) {
         c.collect(f.apply(part));
       }
@@ -140,7 +143,7 @@ public class BasicOperatorTest {
         ListDataSink.get(1);
 
     FlatMap.of(streamOutput)
-        .using((Pair<String, Long> p, Context<Triple<TimeInterval, String, Long>> c) -> {
+        .using((Pair<String, Long> p, Collector<Triple<TimeInterval, String, Long>> c) -> {
           // ~ just access the windows testifying their accessibility
           c.collect(Triple.of((TimeInterval) c.getWindow(), p.getFirst(), p.getSecond()));
         })
@@ -195,7 +198,7 @@ public class BasicOperatorTest {
 
     // expand it to words
     Dataset<Triple<String, Long, Integer>> words = FlatMap.of(lines)
-        .using((Pair<String, Integer> p, Context<Triple<String, Long, Integer>> out) -> {
+        .using((Pair<String, Integer> p, Collector<Triple<String, Long, Integer>> out) -> {
           for (String word : p.getFirst().split(" ")) {
             out.collect(Triple.of(word, 1L, p.getSecond()));
           }
@@ -204,14 +207,14 @@ public class BasicOperatorTest {
 
     // reduce it to counts, use windowing, so the output is batch or stream
     // depending on the type of input
+    words = AssignEventTime.of(words).using(Triple::getThird).output();
     Dataset<Pair<String, Long>> streamOutput = ReduceByKey
         .of(words)
         .keyBy(Triple::getFirst)
         .valueBy(Triple::getSecond)
         .combineBy(Sums.ofLongs())
         .windowBy(Time.of(Duration.ofSeconds(10))
-            .earlyTriggering(Duration.ofMillis(1_003)),
-            e -> (long) e.getThird())
+            .earlyTriggering(Duration.ofMillis(1_003)))
         .output();
 
 
@@ -260,7 +263,7 @@ public class BasicOperatorTest {
 
     // expand it to words
     Dataset<Triple<String, Long, Integer>> words = FlatMap.of(lines)
-        .using((Pair<String, Integer> p, Context<Triple<String, Long, Integer>> out) -> {
+        .using((Pair<String, Integer> p, Collector<Triple<String, Long, Integer>> out) -> {
           for (String word : p.getFirst().split(" ")) {
             out.collect(Triple.of(word, 1L, p.getSecond()));
           }
@@ -269,14 +272,14 @@ public class BasicOperatorTest {
 
     // reduce it to counts, use windowing, so the output is batch or stream
     // depending on the type of input
+    words = AssignEventTime.of(words).using(Triple::getThird).output();
     Dataset<Pair<String, Long>> streamOutput = ReduceByKey
         .of(words)
         .keyBy(Triple::getFirst)
         .valueBy(Triple::getSecond)
         .combineBy(Sums.ofLongs())
         .windowBy(Session.of(Duration.ofSeconds(10))
-            .earlyTriggering(Duration.ofMillis(1_003)),
-            e -> (long) e.getThird())
+            .earlyTriggering(Duration.ofMillis(1_003)))
         .output();
 
 
@@ -353,10 +356,10 @@ public class BasicOperatorTest {
     ImmutableMap<String, Pair<String, Long>> idx =
         Maps.uniqueIndex(f.getOutput(0), Pair::getFirst);
     assertEquals(4, idx.size());
-    assertEquals((long) idx.get("one").getValue(), 4L);
-    assertEquals((long) idx.get("two").getValue(), 3L);
-    assertEquals((long) idx.get("three").getValue(), 2L);
-    assertEquals((long) idx.get("four").getValue(), 1L);
+    assertEquals((long) idx.get("one").getSecond(), 4L);
+    assertEquals((long) idx.get("two").getSecond(), 3L);
+    assertEquals((long) idx.get("three").getSecond(), 2L);
+    assertEquals((long) idx.get("four").getSecond(), 1L);
   }
 
   @Test
@@ -483,10 +486,12 @@ public class BasicOperatorTest {
         .output();
 
     // window it, use the first character as time
+    words = AssignEventTime.of(words)
+        .using(s -> (int) s.charAt(0) * 3_600_000L)
+        .output();
     ReduceWindow.of(words)
         .reduceBy(Sets::newHashSet)
-        .windowBy(Time.of(Duration.ofMinutes(1)),
-            s -> (int) s.charAt(0) * 3_600_000L)
+        .windowBy(Time.of(Duration.ofMinutes(1)))
         .setNumPartitions(4)
         .output()
         .persist(f);

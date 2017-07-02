@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -63,11 +63,10 @@ public class DataSourceInputFormat<V> extends InputFormat<NullWritable, V> {
     return conf;
   }
 
-  private static <V> String toBase64(
-      DataSource<V> source) throws IOException {
-    
+  private static <V> String toBase64(DataSource<V> source) throws IOException {
     return Base64.getEncoder().encodeToString(Serializer.toBytes(source));
   }
+
   private static <V> DataSource<V> fromBase64(String base64bytes)
       throws IOException, ClassNotFoundException {
 
@@ -120,6 +119,10 @@ public class DataSourceInputFormat<V> extends InputFormat<NullWritable, V> {
       }
     }
 
+    @Override
+    public String toString() {
+      return getClass().getName() + "<" + partition + ">";
+    }
   }
 
   DataSource<V> source;

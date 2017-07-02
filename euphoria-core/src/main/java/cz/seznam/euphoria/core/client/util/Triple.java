@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,12 +20,12 @@ import java.util.Objects;
 /**
  * Triple of any types.
  */
-public class Triple<F, S, T> {
+public final class Triple<F, S, T> {
   final F first;
   final S second;
   final T third;
 
-  protected Triple(F first, S second, T third) {
+  private Triple(F first, S second, T third) {
     this.first = first;
     this.second = second;
     this.third = third;

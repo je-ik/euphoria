@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,55 +15,33 @@
  */
 package cz.seznam.euphoria.core.client.operator.state;
 
-import cz.seznam.euphoria.core.client.io.Context;
-
-import java.io.Closeable;
+import cz.seznam.euphoria.core.client.io.Collector;
 
 /**
  * A state for stateful operations.
  */
-public abstract class State<IN, OUT> implements Closeable {
-
-  /** Collector of output of this state. */
-  private final Context<OUT> context;
-  /** Provider of state storage. */
-  private final StorageProvider storageProvider;
+public interface State<IN, OUT> {
 
   /**
    * Add element to this state.
    *
    * @param element the element to add/accumulate to this state
    */
-  public abstract void add(IN element);
+  void add(IN element);
 
   /**
    * Flush the state to output. Invoked when window this
    * state is part of gets disposed/triggered.
+   *
+   * @param context the context to utilize for emitting output elements;
+   *                 never {@code null}
    */
-  public abstract void flush();
-
-  protected State(
-      Context<OUT> context,
-      StorageProvider storageProvider) {
-    
-    this.context = context;
-    this.storageProvider = storageProvider;
-  }
-
-  public Context<OUT> getContext() {
-    return context;
-  }
-
-  public StorageProvider getStorageProvider() {
-    return storageProvider;
-  }
+  void flush(Collector<OUT> context);
 
   /**
-   * Closes this state. Invoked after {@link #flush()} and before
-   * this state gets disposed.
+   * Closes this state. Invoked after {@link #flush(Collector)} and before
+   * this state gets disposed to allow clean-up of temporary state storage.
    */
-  public void close() {
-    // ~ no-op by default
-  }
+  void close();
 
 }

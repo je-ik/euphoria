@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -30,7 +30,8 @@ public interface FlinkExecutorProvider extends ExecutorProvider {
   default ExecutorEnvironment newExecutorEnvironment() throws Exception {
     String path = "/tmp/.flink-test-" + System.currentTimeMillis();
     RocksDBStateBackend backend = new RocksDBStateBackend("file://" + path);
-    FlinkExecutor executor = new TestFlinkExecutor(ModuloInputSplitAssigner::new).setStateBackend(backend);
+    FlinkExecutor executor = new TestFlinkExecutor(ModuloInputSplitAssigner::new)
+        .setStateBackend(backend);
     return new ExecutorEnvironment() {
       @Override
       public Executor getExecutor() {

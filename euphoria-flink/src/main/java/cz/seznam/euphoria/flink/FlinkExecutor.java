@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,10 +15,13 @@
  */
 package cz.seznam.euphoria.flink;
 
+import cz.seznam.euphoria.core.client.accumulators.AccumulatorProvider;
+import cz.seznam.euphoria.core.client.accumulators.VoidAccumulatorProvider;
 import cz.seznam.euphoria.core.client.flow.Flow;
 import cz.seznam.euphoria.core.client.io.DataSink;
 import cz.seznam.euphoria.core.executor.Executor;
 import cz.seznam.euphoria.core.util.Settings;
+import cz.seznam.euphoria.flink.accumulators.FlinkAccumulatorFactory;
 import cz.seznam.euphoria.flink.batch.BatchFlowTranslator;
 import cz.seznam.euphoria.flink.streaming.StreamingFlowTranslator;
 import org.apache.flink.api.common.ExecutionConfig;
@@ -51,11 +54,11 @@ public class FlinkExecutor implements Executor {
   private Duration autoWatermarkInterval = Duration.ofMillis(200);
   private Duration allowedLateness = Duration.ofMillis(0);
   private Duration latencyTracking = Duration.ofSeconds(2);
+  private FlinkAccumulatorFactory accumulatorFactory =
+          new FlinkAccumulatorFactory.Adapter(VoidAccumulatorProvider.getFactory());
   private final Set<Class<?>> registeredClasses = new HashSet<>();
   @Nullable
   private Duration checkpointInterval;
-
-  private boolean objectReuse = false;
 
   // executor to submit flows, if closed all executions should be interrupted
   private final ExecutorService submitExecutor = Executors.newCachedThreadPool();
@@ -92,28 +95,38 @@ public class FlinkExecutor implements Executor {
     LOG.info("Shutting down flink executor.");
     submitExecutor.shutdownNow();
   }
-  
+
+  @Override
+  public void setAccumulatorProvider(AccumulatorProvider.Factory factory) {
+    this.accumulatorFactory = new FlinkAccumulatorFactory.Adapter(
+            Objects.requireNonNull(factory));
+  }
+
+  /**
+   * Set accumulator provider that will be used to collect metrics and counters.
+   * When no provider is set a default instance of {@link VoidAccumulatorProvider}
+   * will be used.
+   *
+   * @param factory Factory to create an instance of accumulator provider.
+   */
+  public void setAccumulatorProvider(FlinkAccumulatorFactory factory) {
+    this.accumulatorFactory = Objects.requireNonNull(factory);
+  }
+
   private Executor.Result execute(Flow flow) {
     try {
       ExecutionEnvironment.Mode mode = ExecutionEnvironment.determineMode(flow);
 
       LOG.info("Running flow in {} mode", mode);
 
-      ExecutionEnvironment environment = new ExecutionEnvironment(
-          mode, localEnv, registeredClasses);
-      if (objectReuse) {
-        environment.getExecutionConfig().enableObjectReuse();
-      } else{
-        environment.getExecutionConfig().disableObjectReuse();
-      }
+      ExecutionEnvironment environment =
+          new ExecutionEnvironment(mode, localEnv, registeredClasses);
       environment.getExecutionConfig().setLatencyTrackingInterval(latencyTracking.toMillis());
 
       Settings settings = flow.getSettings();
 
       if (mode == ExecutionEnvironment.Mode.STREAMING) {
-        if (stateBackend.isPresent()) {
-          environment.getStreamEnv().setStateBackend(stateBackend.get());
-        }
+        stateBackend.ifPresent(be -> environment.getStreamEnv().setStateBackend(be));
         if (checkpointInterval != null) {
           LOG.info("Enabled checkpoints every: {}", checkpointInterval);
           environment.getStreamEnv().enableCheckpointing(checkpointInterval.toMillis());
@@ -125,22 +138,30 @@ public class FlinkExecutor implements Executor {
 
       FlowTranslator translator;
       if (mode == ExecutionEnvironment.Mode.BATCH) {
-        translator = createBatchTranslator(settings, environment);
+        translator = createBatchTranslator(settings, environment, accumulatorFactory);
       } else {
-        translator = createStreamTranslator(settings, environment, allowedLateness, autoWatermarkInterval);
+        translator = createStreamTranslator(settings, environment, accumulatorFactory, allowedLateness, autoWatermarkInterval);
       }
 
       List<DataSink<?>> sinks = translator.translateInto(flow);
 
       if (dumpExecPlan) {
+        if (mode == ExecutionEnvironment.Mode.BATCH) {
+          // ~ see https://issues.apache.org/jira/browse/FLINK-6296
+          LOG.warn("Dumping the executing plan in {} mode" +
+                   " cause Flink to fail a succeeding executing attempt" +
+                   " in certain scenarios! Please try calling" +
+                   " #setDumpExecutionPlan(false) if your flow" +
+                   " does start executing.");
+        }
         LOG.info("Flink execution plan for {}: {}",
             flow.getName(), environment.dumpExecutionPlan());
       }
 
       try {
-        LOG.info("Before execute");
+        LOG.debug("Before execute");
         environment.execute(); // blocking operation
-        LOG.info("After execute");
+        LOG.debug("After execute");
       } catch (Throwable e) {
         // when exception thrown rollback all sinks
         for (DataSink<?> s : sinks) {
@@ -153,7 +174,7 @@ public class FlinkExecutor implements Executor {
         throw e;
       }
 
-      LOG.info("Before commit");
+      LOG.debug("Before commit");
       // when the execution is successful commit all sinks
       Exception ex = null;
       for (DataSink<?> s : sinks) {
@@ -164,6 +185,7 @@ public class FlinkExecutor implements Executor {
           ex = e;
         }
       }
+      LOG.debug("After commit");
 
       // rethrow the exception if any
       if (ex != null) {
@@ -178,29 +200,20 @@ public class FlinkExecutor implements Executor {
     }
   }
   
-  protected FlowTranslator createBatchTranslator(Settings settings, ExecutionEnvironment environment) {
-    return new BatchFlowTranslator(settings, environment.getBatchEnv());
+  protected FlowTranslator createBatchTranslator(Settings settings,
+                                                 ExecutionEnvironment environment,
+                                                 FlinkAccumulatorFactory accumulatorFactory) {
+    return new BatchFlowTranslator(settings, environment.getBatchEnv(), accumulatorFactory);
   }
   
   protected FlowTranslator createStreamTranslator(Settings settings, 
                                                   ExecutionEnvironment environment,
+                                                  FlinkAccumulatorFactory accumulatorFactory,
                                                   Duration allowedLateness, 
                                                   Duration autoWatermarkInterval) {
     return new StreamingFlowTranslator(
-            settings, environment.getStreamEnv(), allowedLateness, autoWatermarkInterval);
-  }
-
-  /**
-   * See {@link ExecutionConfig#disableObjectReuse()}
-   * and {@link ExecutionConfig#disableObjectReuse()}.
-   *
-   * @param reuse set TRUE for enabling object reuse
-   *
-   * @return this instance (for method chaining purposes)
-   */
-  public FlinkExecutor setObjectReuse(boolean reuse){
-    this.objectReuse = reuse;
-    return this;
+            settings, environment.getStreamEnv(), accumulatorFactory,
+            allowedLateness, autoWatermarkInterval);
   }
 
   /**

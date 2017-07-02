@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,12 +19,11 @@ import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.dataset.windowing.Time;
 import cz.seznam.euphoria.core.client.dataset.windowing.TimeInterval;
 import cz.seznam.euphoria.core.client.flow.Flow;
-import cz.seznam.euphoria.core.client.functional.StateFactory;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.io.ListDataSink;
 import cz.seznam.euphoria.core.client.io.ListDataSource;
-import cz.seznam.euphoria.core.client.operator.ExtractEventTime;
-import cz.seznam.euphoria.core.client.operator.MapElements;
+import cz.seznam.euphoria.core.client.operator.FlatMap;
 import cz.seznam.euphoria.core.client.operator.ReduceStateByKey;
 import cz.seznam.euphoria.core.client.operator.state.ListStorage;
 import cz.seznam.euphoria.core.client.operator.state.ListStorageDescriptor;
@@ -37,7 +36,6 @@ import org.junit.Test;
 
 import java.time.Duration;
 import java.util.Arrays;
-import java.util.Iterator;
 import java.util.stream.Collectors;
 
 import static java.util.Arrays.asList;
@@ -45,13 +43,10 @@ import static org.junit.Assert.assertEquals;
 
 public class RSBKWindowingTest {
 
-  private static class AccState<VALUE> extends State<VALUE, VALUE> {
+  private static class AccState<VALUE> implements State<VALUE, VALUE> {
     final ListStorage<VALUE> reducableValues;
     @SuppressWarnings("unchecked")
-    AccState(Context<VALUE> context,
-             StorageProvider storageProvider)
-    {
-      super(context, storageProvider);
+    AccState(StorageProvider storageProvider) {
       reducableValues = storageProvider.getListStorage(
           ListStorageDescriptor.of("vals", (Class) Object.class));
     }
@@ -63,9 +58,9 @@ public class RSBKWindowingTest {
     }
 
     @Override
-    public void flush() {
+    public void flush(Collector<VALUE> context) {
       for (VALUE value : reducableValues.get()) {
-        getContext().collect(value);
+        context.collect(value);
       }
     }
 
@@ -78,13 +73,11 @@ public class RSBKWindowingTest {
       reducableValues.clear();
     }
 
-    public static <VALUE> AccState<VALUE> combine(Iterable<AccState<VALUE>> xs) {
-      Iterator<AccState<VALUE>> iter = xs.iterator();
-      AccState<VALUE> first = iter.next();
-      while (iter.hasNext()) {
-        first.add(iter.next());
+    public static <VALUE>
+    void combine(AccState<VALUE> target, Iterable<AccState<VALUE>> others) {
+      for (AccState<VALUE> other : others) {
+        target.add(other);
       }
-      return first;
     }
   }
 
@@ -108,15 +101,12 @@ public class RSBKWindowingTest {
 
     Flow f = Flow.create("test-windowing");
     Dataset<Pair<String, Pair<String, Integer>>> reduced =
-        ReduceStateByKey.of(f.createInput(source))
+        ReduceStateByKey.of(f.createInput(source, Pair::getSecond))
         .keyBy(Pair::getFirst)
         .valueBy(e -> e)
-        .stateFactory((StateFactory<Pair<String, Integer>, AccState<Pair<String,
-            Integer>>>) AccState::new)
-        .combineStateBy(AccState::combine)
-        .windowBy(Time.of(Duration.ofMillis(5)),
-            // ~ event time
-            (ExtractEventTime<Pair<String, Integer>>) what -> (long) what.getSecond())
+        .stateFactory((StorageProvider storages, Collector<Pair<String, Integer>> ctx) -> new AccState<>(storages))
+        .mergeStatesBy(AccState::combine)
+        .windowBy(Time.of(Duration.ofMillis(5)))
         .setNumPartitions(1)
         .output();
 
@@ -160,30 +150,29 @@ public class RSBKWindowingTest {
     Flow f = Flow.create("test-attached-windowing");
 
     Dataset<Pair<String, Pair<String, Integer>>> firstStep =
-        ReduceStateByKey.of(f.createInput(source))
+        ReduceStateByKey.of(f.createInput(source, Pair::getSecond))
             .keyBy(Pair::getFirst)
             .valueBy(e -> e)
-            .stateFactory((StateFactory<Pair<String, Integer>, AccState<Pair<String, Integer>>>) AccState::new)
-            .combineStateBy(AccState::combine)
-            .windowBy(Time.of(Duration.ofMillis(5)),
-                // ~ event time
-                (ExtractEventTime<Pair<String, Integer>>) what -> (long) what.getSecond())
+            .stateFactory((StorageProvider storages, Collector<Pair<String, Integer>> ctx) -> new AccState<>(storages))
+            .mergeStatesBy(AccState::combine)
+            .windowBy(Time.of(Duration.ofMillis(5)))
             .setNumPartitions(1)
             .output();
 
     Dataset<Pair<String, Integer>> secondStep =
-        MapElements.of(firstStep).using(Pair::getSecond).output();
+        FlatMap.of(firstStep)
+        .using((UnaryFunctor<Pair<String, Pair<String, Integer>>, Pair<String, Integer>>)
+            (elem, context) -> context.collect(elem.getSecond()))
+        .eventTimeBy(e -> e.getSecond().getSecond())
+        .output();
 
     Dataset<Pair<String, Pair<String, Integer>>> reduced =
         ReduceStateByKey.of(secondStep)
         .keyBy(Pair::getFirst)
         .valueBy(e -> e)
-        .stateFactory((StateFactory<Pair<String, Integer>, AccState<Pair<String,
-            Integer>>>) AccState::new)
-        .combineStateBy(AccState::combine)
-        .windowBy(Time.of(Duration.ofMillis(5)),
-            // ~ event time
-            (ExtractEventTime<Pair<String, Integer>>) what -> (long) what.getSecond())
+        .stateFactory((StorageProvider storages, Collector<Pair<String, Integer>> ctx) -> new AccState<>(storages))
+        .mergeStatesBy(AccState::combine)
+        .windowBy(Time.of(Duration.ofMillis(5)))
         .setNumPartitions(1)
         .output();
 

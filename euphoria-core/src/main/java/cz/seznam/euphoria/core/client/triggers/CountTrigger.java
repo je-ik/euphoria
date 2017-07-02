@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -40,7 +40,6 @@ public class CountTrigger<W extends Window> implements Trigger<W> {
     count.set(count.get() + 1L);
 
     if (count.get() >= maxCount) {
-      count.clear();
       return TriggerResult.FLUSH_AND_PURGE;
     }
     return TriggerResult.NOOP;
@@ -57,14 +56,7 @@ public class CountTrigger<W extends Window> implements Trigger<W> {
   }
 
   @Override
-  public TriggerResult onMerge(W window, TriggerContext.TriggerMergeContext ctx) {
+  public void onMerge(W window, TriggerContext.TriggerMergeContext ctx) {
     ctx.mergeStoredState(COUNT_DESCR);
-    ValueStorage<Long> count = ctx.getValueStorage(COUNT_DESCR);
-
-    if (count.get() >= maxCount) {
-      count.clear();
-      return TriggerResult.FLUSH_AND_PURGE;
-    }
-    return TriggerResult.NOOP;
   }
 }

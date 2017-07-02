@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -51,8 +51,8 @@ public class TimeTrigger implements Trigger<TimeInterval> {
   }
 
   @Override
-  public TriggerResult onMerge(TimeInterval window, TriggerContext.TriggerMergeContext ctx) {
-    return registerTimer(window, ctx);
+  public void onMerge(TimeInterval window, TriggerContext.TriggerMergeContext ctx) {
+    registerTimer(window, ctx);
   }
 
   private TriggerResult registerTimer(TimeInterval window, TriggerContext ctx) {

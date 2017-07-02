@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,6 +20,12 @@ import java.io.Serializable;
 @FunctionalInterface
 public interface ExtractEventTime<I> extends Serializable {
 
-  /** Extracts event time (in millis since epoch) of the given element. */
+  /** 
+   * Extracts event time (in millis since epoch) of the given element.
+   * 
+   * @param elem input element
+   *
+   * @return the extracted event time
+   */
   long extractTimestamp(I elem);
 }

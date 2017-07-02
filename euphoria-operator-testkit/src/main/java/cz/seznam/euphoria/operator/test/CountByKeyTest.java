@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@ package cz.seznam.euphoria.operator.test;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.dataset.windowing.Time;
+import cz.seznam.euphoria.core.client.operator.AssignEventTime;
 import cz.seznam.euphoria.core.client.operator.CountByKey;
 import cz.seznam.euphoria.core.client.util.Pair;
 import cz.seznam.euphoria.operator.test.junit.AbstractOperatorTest;
@@ -40,8 +41,9 @@ public class CountByKeyTest extends AbstractOperatorTest {
   public void testCount() {
     execute(new AbstractTestCase<Integer, Pair<Integer, Long>>() {
       @Override
-      protected Dataset<Pair<Integer, Long>> getOutput(
-          Dataset<Integer> input) {
+      protected Dataset<Pair<Integer, Long>> getOutput(Dataset<Integer> input) {
+        // ~ use stable event-time watermark
+        input = AssignEventTime.of(input).using(e -> 0).output();
         return CountByKey.of(input)
             .keyBy(e -> e)
             .setPartitioner(i -> i)
@@ -93,9 +95,10 @@ public class CountByKeyTest extends AbstractOperatorTest {
       @Override
       protected Dataset<Pair<Integer, Long>> getOutput(
           Dataset<Pair<Integer, Long>> input) {
+        input = AssignEventTime.of(input).using(Pair::getSecond).output();
         return CountByKey.of(input)
             .keyBy(Pair::getFirst)
-            .windowBy(Time.of(Duration.ofSeconds(1)), Pair::getSecond)
+            .windowBy(Time.of(Duration.ofSeconds(1)))
             .output();
       }
 

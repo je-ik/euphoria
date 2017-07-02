@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,12 +17,14 @@ package cz.seznam.euphoria.core.client.operator;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.flow.Flow;
-import cz.seznam.euphoria.core.client.functional.BinaryFunctor;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
 import org.junit.Test;
+
+import java.math.BigDecimal;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 
 public class FlatMapTest {
 
@@ -33,8 +35,54 @@ public class FlatMapTest {
 
     Dataset<String> mapped = FlatMap.named("FlatMap1")
        .of(dataset)
-       .using((String s, Context<String> c) -> c.collect(s))
+       .using((String s, Collector<String> c) -> c.collect(s))
        .output();
+
+    assertEquals(flow, mapped.getFlow());
+    assertEquals(1, flow.size());
+
+    FlatMap map = (FlatMap) flow.operators().iterator().next();
+    assertEquals(flow, map.getFlow());
+    assertEquals("FlatMap1", map.getName());
+    assertNotNull(map.getFunctor());
+    assertEquals(mapped, map.output());
+    assertNull(map.getEventTimeExtractor());
+  }
+
+  @Test
+  public void testBuild_EventTimeExtractor() {
+    Flow flow = Flow.create("TEST");
+    Dataset<String> dataset = Util.createMockDataset(flow, 1);
+
+    Dataset<BigDecimal> mapped = FlatMap.named("FlatMap2")
+        .of(dataset)
+        .using((String s, Collector<BigDecimal> c) -> c.collect(null))
+        .eventTimeBy(Long::parseLong) // ~ consuming the original input elements
+        .output();
+
+    assertEquals(flow, mapped.getFlow());
+    assertEquals(1, flow.size());
+
+    FlatMap map = (FlatMap) flow.operators().iterator().next();
+    assertEquals(flow, map.getFlow());
+    assertEquals("FlatMap2", map.getName());
+    assertNotNull(map.getFunctor());
+    assertEquals(mapped, map.output());
+    assertNotNull(map.getEventTimeExtractor());
+  }
+
+  @Test
+  public void testBuild_WithCounters() {
+    Flow flow = Flow.create("TEST");
+    Dataset<String> dataset = Util.createMockDataset(flow, 1);
+
+    Dataset<String> mapped = FlatMap.named("FlatMap1")
+            .of(dataset)
+            .using((String s, Collector<String> c) -> {
+              c.getCounter("my-counter").increment();
+              c.collect(s);
+            })
+            .output();
 
     assertEquals(flow, mapped.getFlow());
     assertEquals(1, flow.size());
@@ -52,7 +100,7 @@ public class FlatMapTest {
     Dataset<String> dataset = Util.createMockDataset(flow, 1);
 
     Dataset<String> mapped = FlatMap.of(dataset)
-            .using((String s, Context<String> c) -> c.collect(s))
+            .using((String s, Collector<String> c) -> c.collect(s))
             .output();
 
     FlatMap map = (FlatMap) flow.operators().iterator().next();
@@ -72,7 +120,7 @@ public class FlatMapTest {
     assertEquals(N_PARTITIONS, input.getNumPartitions());
 
     Dataset<Object> output = FlatMap.of(input)
-        .using((Object o, Context<Object> c) -> c.collect(o))
+        .using((Object o, Collector<Object> c) -> c.collect(o))
         .output();
     assertEquals(N_PARTITIONS, output.getNumPartitions());
   }

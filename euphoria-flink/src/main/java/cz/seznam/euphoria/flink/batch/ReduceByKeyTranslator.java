@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package cz.seznam.euphoria.flink.batch;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
@@ -20,23 +21,31 @@ import cz.seznam.euphoria.core.client.dataset.windowing.TimedWindow;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
+import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
 import cz.seznam.euphoria.core.client.operator.ExtractEventTime;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
 import cz.seznam.euphoria.core.client.util.Pair;
+import cz.seznam.euphoria.core.executor.util.SingleValueContext;
 import cz.seznam.euphoria.flink.FlinkOperator;
 import cz.seznam.euphoria.flink.Utils;
 import cz.seznam.euphoria.flink.functions.PartitionerWrapper;
 import cz.seznam.euphoria.shaded.guava.com.google.common.base.Preconditions;
 import cz.seznam.euphoria.shaded.guava.com.google.common.collect.Iterables;
-import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.common.functions.GroupCombineFunction;
+import org.apache.flink.api.common.functions.GroupReduceFunction;
 import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.api.java.DataSet;
 import org.apache.flink.api.java.functions.KeySelector;
 import org.apache.flink.api.java.operators.FlatMapOperator;
 import org.apache.flink.api.java.operators.Operator;
 import org.apache.flink.api.java.tuple.Tuple2;
+import org.apache.flink.api.java.typeutils.ResultTypeQueryable;
+import org.apache.flink.util.Collector;
 
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 
 public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKey> {
 
@@ -53,12 +62,13 @@ public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKe
   public DataSet translate(FlinkOperator<ReduceByKey> operator,
                            BatchExecutorContext context) {
 
-    // FIXME parallelism should be set to the same level as parent until we reach "shuffling"
-
-    DataSet input = Iterables.getOnlyElement(context.getInputStreams(operator));
+    int inputParallelism =
+            Iterables.getOnlyElement(context.getInputOperators(operator)).getParallelism();
+    DataSet input =
+            Iterables.getOnlyElement(context.getInputStreams(operator));
 
     ReduceByKey origOperator = operator.getOriginalOperator();
-    final UnaryFunction<Iterable, Object> reducer = origOperator.getReducer();
+    final UnaryFunctor<Iterable, Object> reducer = origOperator.getReducer();
     final Windowing windowing =
         origOperator.getWindowing() == null
         ? AttachedWindowing.INSTANCE
@@ -79,16 +89,9 @@ public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKe
     // ~ extract key/value from input elements and assign windows
     DataSet<BatchElement<Window, Pair>> tuples;
     {
-      // FIXME require keyExtractor to deliver `Comparable`s
-
-      ExtractEventTime timeAssigner = origOperator.getEventTimeAssigner();
       FlatMapOperator<Object, BatchElement<Window, Pair>> wAssigned =
           input.flatMap((i, c) -> {
             BatchElement wel = (BatchElement) i;
-            if (timeAssigner != null) {
-              long stamp = timeAssigner.extractTimestamp(wel.getElement());
-              wel.setTimestamp(stamp);
-            }
             Iterable<Window> assigned = windowing.assignWindowsToElement(wel);
             for (Window wid : assigned) {
               Object el = wel.getElement();
@@ -101,18 +104,16 @@ public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKe
           });
       tuples = wAssigned
           .name(operator.getName() + "::map-input")
-          .setParallelism(operator.getParallelism())
+          .setParallelism(inputParallelism)
           .returns(new TypeHint<BatchElement<Window, Pair>>() {});
     }
 
     // ~ reduce the data now
-    Operator<BatchElement<Window, Pair>, ?> reduced;
-    reduced = tuples
-        .groupBy(new RBKKeySelector())
-        .reduce(new RBKReducer(reducer));
-    reduced = reduced
-        .setParallelism(operator.getParallelism())
-        .name(operator.getName() + "::reduce");
+    Operator<BatchElement<Window, Pair>, ?> reduced =
+            tuples.groupBy(new RBKKeySelector())
+                    .reduceGroup(new RBKReducer(reducer))
+                    .setParallelism(operator.getParallelism())
+                    .name(operator.getName() + "::reduce");
 
     // FIXME partitioner should be applied during "reduce" to avoid
     // unnecessary shuffle, but there is no (known) way how to set custom
@@ -125,7 +126,7 @@ public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKe
               new PartitionerWrapper<>(origOperator.getPartitioning().getPartitioner()),
               Utils.wrapQueryable(
                   (KeySelector<BatchElement<Window, Pair>, Comparable>)
-                      (BatchElement<Window, Pair> we) -> (Comparable) we.getElement().getKey(),
+                      (BatchElement<Window, Pair> we) -> (Comparable) we.getElement().getFirst(),
                   Comparable.class))
           .setParallelism(operator.getParallelism());
     }
@@ -136,40 +137,112 @@ public class ReduceByKeyTranslator implements BatchOperatorTranslator<ReduceByKe
   // ------------------------------------------------------------------------------
 
   /**
-   * Produces Tuple2[Window, Element Key]
+   * Grouping by key hashcode will effectively group elements with the same key
+   * to the one bucket. Although there may occur some collisions that we need
+   * to be aware of in later processing.
+   * <p>
+   * Produces Tuple2[Window, Element Key].hashCode
    */
   @SuppressWarnings("unchecked")
   static class RBKKeySelector
-          implements KeySelector<BatchElement<Window, Pair>, Tuple2<Comparable, Comparable>> {
-    
+          implements KeySelector<BatchElement<Window, Pair>, Integer> {
+
     @Override
-    public Tuple2<Comparable, Comparable> getKey(
+    public Integer getKey(
             BatchElement<Window, Pair> value) {
 
-      return new Tuple2(value.getWindow(), value.getElement().getKey());
+      Tuple2 tuple = new Tuple2();
+      tuple.f0 = value.getWindow();
+      tuple.f1 =  value.getElement().getFirst();
+      return tuple.hashCode();
     }
   }
 
   static class RBKReducer
-        implements ReduceFunction<BatchElement<Window, Pair>> {
+          implements GroupReduceFunction<BatchElement<Window, Pair>, BatchElement<Window, Pair>>,
+          GroupCombineFunction<BatchElement<Window, Pair>, BatchElement<Window, Pair>>,
+          ResultTypeQueryable<BatchElement<Window, Pair>> {
 
-    final UnaryFunction<Iterable, Object> reducer;
+    final UnaryFunctor<Iterable, Object> reducer;
+    transient SingleValueContext<Object> singleValueContext;
 
-    RBKReducer(UnaryFunction<Iterable, Object> reducer) {
+    RBKReducer(UnaryFunctor<Iterable, Object> reducer) {
       this.reducer = reducer;
     }
 
     @Override
-    public BatchElement<Window, Pair>
-    reduce(BatchElement<Window, Pair> p1, BatchElement<Window, Pair> p2) {
+    public void combine(Iterable<BatchElement<Window, Pair>> values, Collector<BatchElement<Window, Pair>> out) {
+      doReduce(values, out);
+    }
 
-      Window wid = p1.getWindow();
-      return new BatchElement<>(
-              wid,
-              Math.max(p1.getTimestamp(), p2.getTimestamp()),
-              Pair.of(
-                      p1.getElement().getKey(),
-                      reducer.apply(Arrays.asList(p1.getElement().getSecond(), p2.getElement().getSecond()))));
+    @Override
+    public void reduce(Iterable<BatchElement<Window, Pair>> values, Collector<BatchElement<Window, Pair>> out) {
+      doReduce(values, out);
+    }
+
+    private void doReduce(
+        Iterable<BatchElement<Window, Pair>> values,
+        org.apache.flink.util.Collector<BatchElement<Window, Pair>> out) {
+
+      // Tuple2[Key, Window] => Reduced Value
+      Map<Tuple2, TimestampedElement> reducedValues = new HashMap<>();
+
+      if (singleValueContext == null) {
+        singleValueContext = new SingleValueContext<>();
+      }
+
+      for (BatchElement<Window, Pair> batchElement : values) {
+        Object key = batchElement.getElement().getFirst();
+        Window window = batchElement.getWindow();
+
+        // Order of items in this Tuple2 is reversed compared to the
+        // order in KeySelector. This is made on purpose because
+        // all values in this reducer have the same hash code.
+        // Reversing the order will lead to better performance
+        // when kw is put into hash map.
+        Tuple2 kw = new Tuple2<>(key, window);
+
+        // TimestampedElement holds only timestamp and reduced value.
+        // Key and window is stored separately in key part of the HashMap.
+        TimestampedElement val = reducedValues.get(kw);
+        if (val == null) {
+
+          // It is necessary here to make a copy of the input element
+          // because of the reported bug in Apache Flink.
+          // See https://issues.apache.org/jira/browse/FLINK-6394
+          reducedValues.put(kw, new TimestampedElement(
+                  batchElement.getTimestamp(),
+                  batchElement.getElement().getSecond()));
+        } else {
+
+          reducer.apply(Arrays.asList(
+              val.getElement(), batchElement.getElement().getSecond()),
+              singleValueContext);
+          Object reduced = singleValueContext.getAndResetValue();
+
+          val.setElement(reduced);
+          val.setTimestamp(Math.max(val.getTimestamp(), batchElement.getTimestamp()));
+        }
+      }
+
+      for (Map.Entry<Tuple2, TimestampedElement> e : reducedValues.entrySet()) {
+        Object key = e.getKey().f0;
+        Window window = (Window) e.getKey().f1;
+
+        @SuppressWarnings("unchecked")
+        BatchElement<Window, Pair> batchElement = new BatchElement<>(
+                window,
+                e.getValue().getTimestamp(),
+                Pair.of(key, e.getValue().getElement()));
+
+        out.collect(batchElement);
+      }
+    }
+
+    @Override
+    @SuppressWarnings("unchecked")
+    public TypeInformation<BatchElement<Window, Pair>> getProducedType() {
+      return TypeInformation.of((Class) BatchElement.class);
     }
   }
 }

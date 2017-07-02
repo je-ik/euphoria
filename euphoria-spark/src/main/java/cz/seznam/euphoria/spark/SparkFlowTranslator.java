@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,6 +15,7 @@
  */
 package cz.seznam.euphoria.spark;
 
+import cz.seznam.euphoria.core.client.accumulators.AccumulatorProvider;
 import cz.seznam.euphoria.core.client.flow.Flow;
 import cz.seznam.euphoria.core.client.functional.UnaryPredicate;
 import cz.seznam.euphoria.core.client.graph.DAG;
@@ -25,10 +26,13 @@ import cz.seznam.euphoria.core.client.operator.Operator;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
 import cz.seznam.euphoria.core.client.operator.ReduceStateByKey;
 import cz.seznam.euphoria.core.client.operator.Repartition;
+import cz.seznam.euphoria.core.client.operator.Sort;
 import cz.seznam.euphoria.core.client.operator.Union;
 import cz.seznam.euphoria.core.executor.FlowUnfolder;
+import cz.seznam.euphoria.core.util.Settings;
 import cz.seznam.euphoria.hadoop.output.DataSinkOutputFormat;
 import cz.seznam.euphoria.shaded.guava.com.google.common.base.Preconditions;
+import cz.seznam.euphoria.spark.accumulators.SparkAccumulatorFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.NullWritable;
 import org.apache.hadoop.mapreduce.JobContext;
@@ -79,10 +83,17 @@ public class SparkFlowTranslator {
 
   /* mapping of Euphoria operators to corresponding Flink transformations */
   private final Map<Class, Translation> translations = new IdentityHashMap<>();
-  private final JavaSparkContext sparkEnv;
 
-  public SparkFlowTranslator(JavaSparkContext sparkEnv) {
+  private final JavaSparkContext sparkEnv;
+  private final Settings settings;
+  private final SparkAccumulatorFactory accumulatorFactory;
+
+  public SparkFlowTranslator(JavaSparkContext sparkEnv,
+                             Settings flowSettings,
+                             SparkAccumulatorFactory accumulatorFactory) {
     this.sparkEnv = Objects.requireNonNull(sparkEnv);
+    this.settings = Objects.requireNonNull(flowSettings);
+    this.accumulatorFactory = Objects.requireNonNull(accumulatorFactory);
 
     // basic operators
     Translation.set(translations, FlowUnfolder.InputOperator.class, new InputTranslator());
@@ -94,6 +105,8 @@ public class SparkFlowTranslator {
     // derived operators
     Translation.set(translations, ReduceByKey.class, new ReduceByKeyTranslator(),
             ReduceByKeyTranslator::wantTranslate);
+    Translation.set(translations, Sort.class, new SortTranslator(),
+            SortTranslator::wantTranslate);
   }
 
   @SuppressWarnings("unchecked")
@@ -102,7 +115,7 @@ public class SparkFlowTranslator {
     DAG<Operator<?, ?>> dag = flowToDag(flow);
 
     SparkExecutorContext executorContext =
-            new SparkExecutorContext(sparkEnv, dag);
+            new SparkExecutorContext(sparkEnv, dag, accumulatorFactory, settings);
 
     // translate each operator to proper Spark transformation
     dag.traverse().map(Node::get).forEach(op -> {

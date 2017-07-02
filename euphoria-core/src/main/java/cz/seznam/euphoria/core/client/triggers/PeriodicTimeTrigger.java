@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -76,12 +76,10 @@ public class PeriodicTimeTrigger implements Trigger<TimeInterval> {
   }
 
   @Override
-  public TriggerResult onMerge(TimeInterval window, TriggerContext.TriggerMergeContext ctx) {
+  public void onMerge(TimeInterval window, TriggerContext.TriggerMergeContext ctx) {
     ctx.mergeStoredState(FIRE_TIME_DESCR);
     // register timer according to merged state
     ValueStorage<Long> fireStamp = ctx.getValueStorage(FIRE_TIME_DESCR);
     ctx.registerTimer(fireStamp.get(), window);
-
-    return TriggerResult.NOOP;
   }
 }

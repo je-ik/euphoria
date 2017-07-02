@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,22 +16,31 @@
 package cz.seznam.euphoria.operator.test;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
+import cz.seznam.euphoria.core.client.dataset.windowing.Session;
+import cz.seznam.euphoria.core.client.dataset.windowing.Time;
+import cz.seznam.euphoria.core.client.dataset.windowing.TimeInterval;
 import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.flow.Flow;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
+import cz.seznam.euphoria.core.client.operator.AssignEventTime;
 import cz.seznam.euphoria.core.client.operator.Join;
+import cz.seznam.euphoria.core.client.operator.MapElements;
 import cz.seznam.euphoria.core.client.triggers.NoopTrigger;
 import cz.seznam.euphoria.core.client.triggers.Trigger;
 import cz.seznam.euphoria.core.client.util.Either;
 import cz.seznam.euphoria.core.client.util.Pair;
+import cz.seznam.euphoria.core.client.util.Triple;
+import cz.seznam.euphoria.operator.test.accumulators.SnapshotProvider;
 import cz.seznam.euphoria.operator.test.junit.AbstractOperatorTest;
 import cz.seznam.euphoria.operator.test.junit.Processing;
 import org.junit.Test;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 
@@ -68,7 +77,7 @@ public class JoinTest extends AbstractOperatorTest {
           Dataset<Integer> left, Dataset<Long> right) {
         return Join.of(left, right)
             .by(e -> e, e -> (int) (e % 10))
-            .using((Integer l, Long r, Context<String> c) -> c.collect(l + "+" + r))
+            .using((Integer l, Long r, Collector<String> c) -> c.collect(l + "+" + r))
             .setPartitioner(e -> e % 2)
             .outer()
             .output();
@@ -120,7 +129,9 @@ public class JoinTest extends AbstractOperatorTest {
           Dataset<Integer> left, Dataset<Long> right) {
         return Join.of(left, right)
             .by(e -> e, e -> (int) (e % 10))
-            .using((Integer l, Long r, Context<String> c) -> c.collect(l + "+" + r))
+            .using((Integer l, Long r, Collector<String> c) -> {
+                c.collect(l + "+" + r);
+            })
             .setPartitioner(e -> e % 2)
             .output();
       }
@@ -196,7 +207,7 @@ public class JoinTest extends AbstractOperatorTest {
           Dataset<Integer> left, Dataset<Long> right) {
         return Join.of(left, right)
             .by(e -> e, e -> (int) (e % 10))
-            .using((Integer l, Long r, Context<String> c) -> {
+            .using((Integer l, Long r, Collector<String> c) -> {
               c.collect(l + "+" + r);
             })
             .setNumPartitions(2)
@@ -236,6 +247,129 @@ public class JoinTest extends AbstractOperatorTest {
             Pair.of(3, "3+null"), Pair.of(3, "3+null"), Pair.of(3, "null+13"),
             Pair.of(5, "5+null"), Pair.of(5, "null+15"), Pair.of(7, "null+17")),
             second);
+      }
+    });
+  }
+
+  // ~ all of the inputs fall into the same session window (on the same key)
+  // ~ we expect the result to reflect this fact
+  // ~ note: no early triggering
+  @Test
+  public void innerJoinOnSessionWindowingNoEarlyTriggering() {
+    execute(new JoinTestCase<
+        Pair<String, Long>,
+        Pair<String, Long>,
+        Triple<TimeInterval, String, String>>() {
+
+      @Override
+      protected Partitions<Pair<String, Long>> getLeftInput() {
+        return Partitions.add(Pair.of("fi", 1L), Pair.of("fa", 2L)).build();
+      }
+
+      @Override
+      protected Partitions<Pair<String, Long>> getRightInput() {
+        return Partitions.add(Pair.of("ha", 1L), Pair.of("ho", 4L)).build();
+      }
+
+      @Override
+      public int getNumOutputPartitions() {
+        return 1;
+      }
+
+      @Override
+      protected Dataset<Triple<TimeInterval, String, String>>
+      getOutput(Dataset<Pair<String, Long>> left, Dataset<Pair<String, Long>> right) {
+        left = AssignEventTime.of(left).using(Pair::getSecond).output();
+        right = AssignEventTime.of(right).using(Pair::getSecond).output();
+        Dataset<Pair<String, Triple<TimeInterval, String, String>>> joined =
+            Join.of(left, right)
+                .by(p -> "", p -> "")
+                .using((Pair<String, Long> l, Pair<String, Long> r, Collector<Triple<TimeInterval, String, String>> c) ->
+                    c.collect(Triple.of((TimeInterval) c.getWindow(), l.getFirst(), r.getFirst())))
+                .windowBy(Session.of(Duration.ofMillis(10)))
+                .setNumPartitions(1)
+                .output();
+        return MapElements.of(joined).using(Pair::getSecond).output();
+      }
+
+      @Override
+      public void validate(Partitions<Triple<TimeInterval, String, String>> partitions) {
+        TimeInterval expectedWindow = new TimeInterval(1, 14);
+        assertUnorderedEquals(
+            Arrays.asList(
+                Triple.of(expectedWindow, "fi", "ha"),
+                Triple.of(expectedWindow, "fi", "ho"),
+                Triple.of(expectedWindow, "fa", "ha"),
+                Triple.of(expectedWindow, "fa", "ho")),
+            partitions.get(0));
+      }
+    });
+  }
+
+  @Test
+  public void testJoinAccumulators() {
+    execute(new JoinTestCase<
+        Pair<String, Long>,
+        Pair<String, Long>,
+        Triple<TimeInterval, String, String>>() {
+
+      @Override
+      protected Partitions<Pair<String, Long>> getLeftInput() {
+        return Partitions.add(Pair.of("fi", 1L), Pair.of("fa", 3L)).build();
+      }
+
+      @Override
+      protected Partitions<Pair<String, Long>> getRightInput() {
+        return Partitions.add(Pair.of("ha", 1L), Pair.of("ho", 4L)).build();
+      }
+
+      @Override
+      public int getNumOutputPartitions() {
+        return 1;
+      }
+
+      @Override
+      protected Dataset<Triple<TimeInterval, String, String>>
+      getOutput(Dataset<Pair<String, Long>> left, Dataset<Pair<String, Long>> right) {
+        left = AssignEventTime.of(left).using(Pair::getSecond).output();
+        right = AssignEventTime.of(right).using(Pair::getSecond).output();
+        Dataset<Pair<String, Triple<TimeInterval, String, String>>> joined =
+            Join.of(left, right)
+                .by(p -> "", p -> "")
+                .using((Pair<String, Long> l, Pair<String, Long> r, Collector<Triple<TimeInterval, String, String>> c) -> {
+                  TimeInterval window = (TimeInterval) c.getWindow();
+                  c.getCounter("cntr").increment(10);
+                  c.getHistogram("hist-" + l.getFirst().charAt(1)).add(2345, 8);
+                  c.collect(Triple.of(window, l.getFirst(), r.getFirst()));
+                })
+                .windowBy(Time.of(Duration.ofMillis(3)))
+                .setNumPartitions(1)
+                .output();
+        return MapElements.of(joined).using(Pair::getSecond).output();
+      }
+
+      @Override
+      public void validate(Partitions<Triple<TimeInterval, String, String>> partitions) {
+        assertUnorderedEquals(
+            Arrays.asList(
+                Triple.of(new TimeInterval(0, 3), "fi", "ha"),
+                Triple.of(new TimeInterval(3, 6), "fa", "ho")),
+            partitions.get(0));
+      }
+
+      @Override
+      public void validateAccumulators(SnapshotProvider snapshots) {
+        Map<String, Long> counters = snapshots.getCounterSnapshots();
+        assertEquals(Long.valueOf(20L), counters.get("cntr"));
+
+        Map<String, Map<Long, Long>> histograms = snapshots.getHistogramSnapshots();
+        Map<Long, Long> hist = histograms.get("hist-i");
+        assertEquals(1, hist.size());
+        assertEquals(Long.valueOf(8), hist.get(2345L));
+
+        hist = histograms.get("hist-a");
+        assertEquals(1, hist.size());
+        assertEquals(Long.valueOf(8), hist.get(2345L));
       }
     });
   }

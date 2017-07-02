@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -44,9 +44,11 @@ public class TestDistinctBasic {
             Arrays.asList(
                 Pair.of("foo", "bar"),
                 Pair.of("quux", "ibis"),
-                Pair.of("foo", "bar"))));
+                Pair.of("foo", "bar"))),
+            // ~ force event time
+            e -> 1L);
     Distinct.of(input)
-        .windowBy(Time.of(Duration.ofSeconds(1)), e -> 1L) // ~ force event time
+        .windowBy(Time.of(Duration.ofSeconds(1)))
         .output()
         .persist(output);
 

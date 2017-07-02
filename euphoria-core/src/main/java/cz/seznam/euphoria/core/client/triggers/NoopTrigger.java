@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -52,7 +52,7 @@ public final class NoopTrigger<W extends Window> implements Trigger<W> {
   }
 
   @Override
-  public TriggerResult onMerge(W window, TriggerContext.TriggerMergeContext ctx) {
-    return TriggerResult.NOOP;
+  public void onMerge(W window, TriggerContext.TriggerMergeContext ctx) {
+
   }
 }

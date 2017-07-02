@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,19 +15,23 @@
  */
 package cz.seznam.euphoria.core.executor.greduce;
 
+import cz.seznam.euphoria.core.client.accumulators.AccumulatorProvider;
+import cz.seznam.euphoria.core.client.accumulators.Counter;
+import cz.seznam.euphoria.core.client.accumulators.Histogram;
+import cz.seznam.euphoria.core.client.accumulators.Timer;
 import cz.seznam.euphoria.core.client.dataset.windowing.MergingWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.TimedWindow;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.functional.BinaryFunction;
-import cz.seznam.euphoria.core.client.functional.CombinableReduceFunction;
-import cz.seznam.euphoria.core.client.functional.StateFactory;
 import cz.seznam.euphoria.core.client.io.Context;
 import cz.seznam.euphoria.core.client.operator.state.ListStorage;
 import cz.seznam.euphoria.core.client.operator.state.ListStorageDescriptor;
 import cz.seznam.euphoria.core.client.operator.state.MergingStorageDescriptor;
 import cz.seznam.euphoria.core.client.operator.state.State;
+import cz.seznam.euphoria.core.client.operator.state.StateFactory;
+import cz.seznam.euphoria.core.client.operator.state.StateMerger;
 import cz.seznam.euphoria.core.client.operator.state.Storage;
 import cz.seznam.euphoria.core.client.operator.state.StorageDescriptor;
 import cz.seznam.euphoria.core.client.operator.state.StorageProvider;
@@ -68,13 +72,24 @@ public class GroupReducer<WID extends Window, KEY, I> {
     WindowedElement<W, T> create(W window, long timestamp, T element);
   }
 
-  private final StateFactory<?, State> stateFactory;
+  /**
+   * Determines whether the group-reduce should allow early emitting
+   * of output values through states, by supplying them with the output
+   * context upon their creation;
+   * note: early emitting may break watermarking in downstream consumers
+   * (e.g. for time-sliding) and may produce elements with the wrong
+   * window when used together with a merging windowing strategy.
+   */
+  private final boolean allowEarlyEmitting;
+
+  private final StateFactory<I, ?, State<I, ?>> stateFactory;
+  private final StateMerger<I, ?, State<I, ?>> stateCombiner;
   private final WindowedElementFactory<WID, Object> elementFactory;
-  private final CombinableReduceFunction<State> stateCombiner;
   private final StorageProvider stateStorageProvider;
   private final Collector<WindowedElement<?, Pair<KEY, ?>>> collector;
   private final Windowing windowing;
   private final Trigger trigger;
+  private final AccumulatorProvider accumulators;
 
   // ~ temporary store for trigger states
   final TriggerStorage triggerStorage;
@@ -82,20 +97,24 @@ public class GroupReducer<WID extends Window, KEY, I> {
   final HashMap<WID, State> states = new HashMap<>();
   KEY key;
 
-  public GroupReducer(StateFactory<?, State> stateFactory,
-                      WindowedElementFactory<WID, Object> elementFactory,
-                      CombinableReduceFunction<State> stateCombiner,
+  public GroupReducer(StateFactory<I, ?, State<I, ?>> stateFactory,
+                      StateMerger<I, ?, State<I, ?>> stateCombiner,
                       StorageProvider stateStorageProvider,
+                      WindowedElementFactory<WID, Object> elementFactory,
                       Windowing windowing,
                       Trigger trigger,
-                      Collector<WindowedElement<?, Pair<KEY, ?>>> collector) {
+                      Collector<WindowedElement<?, Pair<KEY, ?>>> collector,
+                      AccumulatorProvider accumulators,
+                      boolean allowEarlyEmitting) {
     this.stateFactory = Objects.requireNonNull(stateFactory);
     this.elementFactory = Objects.requireNonNull(elementFactory);
     this.stateCombiner = Objects.requireNonNull(stateCombiner);
     this.stateStorageProvider = Objects.requireNonNull(stateStorageProvider);
+    this.collector = Objects.requireNonNull(collector);
     this.windowing = Objects.requireNonNull(windowing);
     this.trigger = Objects.requireNonNull(trigger);
-    this.collector = Objects.requireNonNull(collector);
+    this.accumulators = Objects.requireNonNull(accumulators);
+    this.allowEarlyEmitting = allowEarlyEmitting;
 
     this.triggerStorage = new TriggerStorage(stateStorageProvider);
   }
@@ -110,34 +129,35 @@ public class GroupReducer<WID extends Window, KEY, I> {
 
     // ~ get the target window
     WID window = elem.getWindow();
-    Trigger.TriggerResult windowTr = Trigger.TriggerResult.NOOP;
 
     // ~ merge the new window into existing ones if necessary
     if (windowing instanceof MergingWindowing) {
-      Pair<WID, Trigger.TriggerResult> r = mergeWindows(window);
-      window = r.getFirst();
-      windowTr = Trigger.TriggerResult.merge(windowTr, r.getSecond());
+      window = mergeWindows(window);
     }
 
-    // ~ get the target window's state
+    // ~ add the value to the target window state
     {
-      State state = states.get(window);
-      if (state == null) {
-        state = stateFactory.apply(
-            new ElementCollectContext(collector, window), stateStorageProvider);
-        states.put(window, state);
-      }
-      // ~ add the value to the target window state
+      State state = getStateForUpdate(window);
       state.add(elem.getElement().getSecond());
     }
 
     // ~ process trigger#onElement
     {
       ElementTriggerContext trgCtx = new ElementTriggerContext(window);
-      windowTr = Trigger.TriggerResult.merge(
-          windowTr, trigger.onElement(elem.getTimestamp(), window, trgCtx));
+      Trigger.TriggerResult windowTr =
+              trigger.onElement(elem.getTimestamp(), window, trgCtx);
       processTriggerResult(window, trgCtx, windowTr);
     }
+  }
+
+  @SuppressWarnings("unchecked")
+  private State getStateForUpdate(WID window) {
+    return states.computeIfAbsent(window, w -> {
+      ElementCollector col = allowEarlyEmitting
+          ? new ElementCollector(collector, w)
+          : null;
+      return stateFactory.createState(stateStorageProvider, col);
+    });
   }
 
   public void close() {
@@ -163,13 +183,11 @@ public class GroupReducer<WID extends Window, KEY, I> {
   // placed into and a trigger indicating how to react on the window after adding
   // the element
   @SuppressWarnings("unchecked")
-  private Pair<WID, Trigger.TriggerResult> mergeWindows(WID newWindow) {
+  private WID mergeWindows(WID newWindow) {
     if (states.containsKey(newWindow)) {
       // ~ the new window exists ... there's nothing to merge
-      return Pair.of(newWindow, Trigger.TriggerResult.NOOP);
+      return newWindow;
     }
-
-    Trigger.TriggerResult newWindowTr = Trigger.TriggerResult.NOOP;
 
     Collection<Pair<Collection<WID>, WID>> merges =
         ((MergingWindowing) windowing).mergeWindows(getActivesWindowsPlus(newWindow));
@@ -183,35 +201,39 @@ public class GroupReducer<WID extends Window, KEY, I> {
         newWindow = target;
       }
 
+      // ~ as of now on, we can assume `sources` do _not_ contain `target`;
+      // this implies:
+      //  a) the target window's state will not be merged into itself
+      //  b) the target window's triggers will not be merged into itself
+      //  c) the target window's trigger #onClear won't be called
+      sources.remove(target);
+
+      // ~ do not bother with the rest of thi for loop if we have
+      // no source windows to merge
+      if (sources.isEmpty()) {
+        continue;
+      }
+
+      // ~ make sure to create the target state if necessary
+      State targetState = getStateForUpdate(target);
+
       // ~ merge the (window) states
       {
-        // ~ first make sure that if any state emits data, it does so for target window
         List<State> sourceStates = removeStatesForMerging(sources);
-        for (State state : sourceStates) {
-          ((ElementCollectContext) state.getContext()).window = target;
-        }
-        // ~ now merge the state
-        State newState = stateCombiner.apply(sourceStates);
-        // ~ and store the new state for the target window
-        states.put(target, newState);
+        stateCombiner.merge(targetState, (List) sourceStates);
       }
 
       // ~ merge trigger states
-      Trigger.TriggerResult tr =
-          trigger.onMerge(target, new MergingTriggerContext(sources, target));
-      if (newWindow.equals(target)) {
-        newWindowTr = Trigger.TriggerResult.merge(newWindowTr, tr);
-      }
+      trigger.onMerge(target, new MergingTriggerContext(sources, target));
       // ~ clear the trigger states of the merged windows
       for (WID source : sources) {
-        if (source.equals(newWindow) || source.equals(target)) {
-          continue;
+        if (!source.equals(newWindow)) {
+          trigger.onClear(source, new ElementTriggerContext(source));
         }
-        trigger.onClear(source, new ElementTriggerContext(source));
       }
     }
 
-    return Pair.of(newWindow, newWindowTr);
+    return newWindow;
   }
 
   private List<WID> getActivesWindowsPlus(WID newWindow) {
@@ -248,7 +270,7 @@ public class GroupReducer<WID extends Window, KEY, I> {
       // ~ close the window
       State state = states.remove(window);
       if (state != null) {
-        state.flush();
+        state.flush(new ElementCollector(collector, window));
         state.close();
       }
       // ~ clean up trigger states
@@ -256,11 +278,11 @@ public class GroupReducer<WID extends Window, KEY, I> {
     }
   }
 
-  class ElementCollectContext<T> implements Context<T> {
+  class ElementCollector<T> implements Context, cz.seznam.euphoria.core.client.io.Collector<T> {
     final Collector<WindowedElement<WID, Pair<KEY, T>>> out;
     WID window;
 
-    ElementCollectContext(Collector<WindowedElement<WID, Pair<KEY, T>>> out, WID window) {
+    ElementCollector(Collector<WindowedElement<WID, Pair<KEY, T>>> out, WID window) {
       this.out = out;
       this.window = window;
     }
@@ -275,9 +297,31 @@ public class GroupReducer<WID extends Window, KEY, I> {
     }
 
     @Override
+    public Context asContext() {
+      return this;
+    }
+
+    @Override
     public Object getWindow() {
       return window;
     }
+
+    @Override
+    public Counter getCounter(String name) {
+      return accumulators.getCounter(name);
+    }
+
+    @Override
+    public Histogram getHistogram(String name) {
+      return accumulators.getHistogram(name);
+    }
+
+    @Override
+    public Timer getTimer(String name) {
+      return accumulators.getTimer(name);
+    }
+
+
   }
 
   class ElementTriggerContext implements TriggerContext {
@@ -322,6 +366,7 @@ public class GroupReducer<WID extends Window, KEY, I> {
 
     private Collection<? extends Window> sources;
 
+    // ~ `trgt` is assumed _not_ to be contained in `srcs`
     MergingTriggerContext(Collection<? extends Window> srcs, Window trgt) {
       super(trgt);
       this.sources = srcs;
@@ -349,10 +394,6 @@ public class GroupReducer<WID extends Window, KEY, I> {
 
       // merge all existing (non null) trigger states
       for (Window w : sources) {
-        // ~ avoid accumulating the state of the target window twice
-        if (w.equals(this.window)) {
-          continue;
-        }
         Storage s = triggerStorage.getStorage(w, descriptor);
         if (s != null) {
           mergeFn.apply(merged, s);

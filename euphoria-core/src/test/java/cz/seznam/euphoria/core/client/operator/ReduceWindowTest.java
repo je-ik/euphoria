@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,12 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 package cz.seznam.euphoria.core.client.operator;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.dataset.windowing.Time;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.flow.Flow;
+import cz.seznam.euphoria.core.client.functional.ReduceFunctor;
+import cz.seznam.euphoria.core.executor.util.SingleValueContext;
 import java.time.Duration;
 import java.util.Arrays;
 
@@ -45,7 +48,8 @@ public class ReduceWindowTest {
 
     ReduceWindow<String, String, Long, ?> producer;
     producer = (ReduceWindow<String, String, Long, ?>) output.getProducer();
-    assertEquals(1L, (long) producer.getReducer().apply(Arrays.asList("blah")));
+    assertEquals(1L, (long) collectSingle(
+        producer.getReducer(), Arrays.asList("blah")));
     assertEquals(2, producer.partitioning.getNumPartitions());
     assertEquals("", producer.valueExtractor.apply("blah"));
   }
@@ -59,17 +63,26 @@ public class ReduceWindowTest {
 
     Dataset<Long> output = ReduceWindow.of(dataset)
         .reduceBy(e -> 1L)
-        .windowBy(windowing, s -> 0L)
+        .windowBy(windowing)
         .applyIf(true, b -> b.setNumPartitions(1))
         .output();
 
     ReduceWindow<String, String, Long, ?> producer;
     producer = (ReduceWindow<String, String, Long, ?>) output.getProducer();
-    assertEquals(1L, (long) producer.getReducer().apply(Arrays.asList("blah")));
+    assertEquals(1L, (long) collectSingle(
+        producer.getReducer(), Arrays.asList("blah")));
     assertEquals(1, producer.partitioning.getNumPartitions());
     assertEquals("blah", producer.valueExtractor.apply("blah"));
     assertEquals(windowing, producer.windowing);
-    assertNotNull(producer.getEventTimeAssigner());
+  }
+
+  private <IN, OUT> OUT collectSingle(
+      ReduceFunctor<IN, OUT> fn, Iterable<IN> values) {
+
+    SingleValueContext<OUT> context;
+    context = new SingleValueContext<>();
+    fn.apply(values, context);
+    return context.getAndResetValue();
   }
 
 

@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -34,12 +34,10 @@ class UnionTranslator implements BatchOperatorTranslator<Union> {
 
     List<DataSet> inputs = (List) context.getInputStreams(operator);
     if (inputs.size() != 2) {
-      throw new IllegalStateException("Should have two datasets on input, got "
-          + inputs.size());
+      throw new IllegalStateException(
+              "Should have two datasets on input, got " + inputs.size());
     }
     Optional<DataSet> reduce = inputs.stream().reduce((l, r) -> l.union(r));
     return reduce.get();
   }
-
-
 }

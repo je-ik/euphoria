@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ interface BatchOperatorTranslator<T extends Operator>
                                ExecutionEnvironment, DataSet<?>,
                                BatchExecutorContext> {
 
-  String CFG_MAX_MEMORY_ELEMENTS_KEY = "euphoria.flink.batch.state.max.memory.elements";
-  int CFG_MAX_MEMORY_ELEMENTS_DEFAULT = 1000;
+  String CFG_LIST_STORAGE_MAX_MEMORY_ELEMS_KEY = "euphoria.flink.batch.list-storage.max-memory-elements";
+  int CFG_LIST_STORAGE_MAX_MEMORY_ELEMS_DEFAULT = 1000;
 
 }

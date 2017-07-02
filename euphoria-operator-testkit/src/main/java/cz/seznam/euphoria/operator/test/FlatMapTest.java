@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,14 +16,17 @@
 package cz.seznam.euphoria.operator.test;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.operator.FlatMap;
+import cz.seznam.euphoria.operator.test.accumulators.SnapshotProvider;
 import cz.seznam.euphoria.operator.test.junit.AbstractOperatorTest;
 import cz.seznam.euphoria.operator.test.junit.Processing;
 import org.junit.Test;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
 
@@ -40,7 +43,7 @@ public class FlatMapTest extends AbstractOperatorTest {
       @Override
       protected Dataset<Integer> getOutput(Dataset<Integer> input) {
         return FlatMap.of(input)
-            .using((Integer e, Context<Integer> c) -> {
+            .using((Integer e, Collector<Integer> c) -> {
               for (int i = 1; i <= e; i++) {
                 c.collect(i);
               }
@@ -70,6 +73,47 @@ public class FlatMapTest extends AbstractOperatorTest {
         return 2;
       }
 
+    });
+  }
+
+  @Test
+  public void testCounterTest() {
+    execute(new AbstractTestCase<Integer, Integer>() {
+      @Override
+      protected Partitions<Integer> getInput() {
+        return Partitions.add(1, 2, 3, 4, 5, 6)
+            .add(0, 10, 20)
+            .build();
+      }
+
+      @Override
+      protected Dataset<Integer> getOutput(Dataset<Integer> input) {
+        return FlatMap.of(input).using(
+            (UnaryFunctor<Integer, Integer>) (elem, collector) -> {
+              collector.getCounter("input").increment();
+              collector.getCounter("sum").increment(elem);
+              collector.collect(elem * elem);
+            })
+            .output();
+      }
+
+      @Override
+      public int getNumOutputPartitions() {
+        return 2;
+      }
+
+      @Override
+      public void validate(Partitions<Integer> partitions) {
+        assertEquals(Arrays.asList(1, 4, 9, 16, 25, 36), partitions.get(0));
+        assertEquals(Arrays.asList(0, 100, 400), partitions.get(1));
+      }
+
+      @Override
+      public void validateAccumulators(SnapshotProvider snapshots) {
+        Map<String, Long> counters = snapshots.getCounterSnapshots();
+        assertEquals(Long.valueOf(9L), counters.get("input"));
+        assertEquals(Long.valueOf(51L), counters.get("sum"));
+      }
     });
   }
 

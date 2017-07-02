@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 package cz.seznam.euphoria.inmem;
 
 import cz.seznam.euphoria.core.client.dataset.Dataset;
-import cz.seznam.euphoria.core.client.dataset.windowing.Batch;
+import cz.seznam.euphoria.core.client.dataset.windowing.GlobalWindowing;
 import cz.seznam.euphoria.core.client.dataset.windowing.Time;
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.WindowedElement;
@@ -24,9 +24,10 @@ import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
 import cz.seznam.euphoria.core.client.flow.Flow;
 import cz.seznam.euphoria.core.client.functional.UnaryFunction;
 import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.io.ListDataSink;
 import cz.seznam.euphoria.core.client.io.ListDataSource;
+import cz.seznam.euphoria.core.client.operator.AssignEventTime;
 import cz.seznam.euphoria.core.client.operator.FlatMap;
 import cz.seznam.euphoria.core.client.operator.MapElements;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
@@ -240,7 +241,7 @@ public class InMemExecutorTest {
 
     // repeat each element N N count
     Dataset<Integer> output = FlatMap.of(ints)
-        .using((Integer e, Context<Integer> c) -> {
+        .using((Integer e, Collector<Integer> c) -> {
           for (int i = 0; i < e; i++) {
             c.collect(e);
           }
@@ -268,15 +269,11 @@ public class InMemExecutorTest {
    * Simple sort state for tests.
    * This state takes comparable elements and produces sorted sequence.
    */
-  public static class SortState extends State<Integer, Integer> {
+  public static class SortState implements State<Integer, Integer> {
 
     final ListStorage<Integer> data;
 
-    SortState(
-        Context<Integer> c,
-        StorageProvider storageProvider) {
-      
-      super(c, storageProvider);
+    SortState(StorageProvider storageProvider, Collector<Integer> c) {
       data = storageProvider.getListStorage(
           ListStorageDescriptor.of("data", Integer.class));
     }
@@ -288,25 +285,18 @@ public class InMemExecutorTest {
 
     @Override
     @SuppressWarnings("unchecked")
-    public void flush() {
+    public void flush(Collector<Integer> context) {
       List<Integer> toSort = Lists.newArrayList(data.get());
       Collections.sort(toSort);
       for (Integer i : toSort) {
-        getContext().collect(i);
+        context.collect(i);
       }
     }
 
-    static SortState combine(Iterable<SortState> others) {
-      SortState ret = null;
-      for (SortState s : others) {
-        if (ret == null) {
-          ret = new SortState(
-              s.getContext(),
-              s.getStorageProvider());
-        }
-        ret.data.addAll(s.data.get());
+    static void combine(SortState target, Iterable<SortState> others) {
+      for (SortState other : others) {
+        target.data.addAll(other.data.get());
       }
-      return ret;
     }
 
     @Override
@@ -315,7 +305,7 @@ public class InMemExecutorTest {
     }
   } // ~ end of SortState
 
-  static class SizedCountWindow extends Window {
+  static class SizedCountWindow extends Window<SizedCountWindow> {
     final int size;
 
     int get() {
@@ -343,6 +333,11 @@ public class InMemExecutorTest {
     @Override
     public int hashCode() {
       return size;
+    }
+
+    @Override
+    public int compareTo(SizedCountWindow o) {
+      return Integer.compare(size, o.size);
     }
   } // ~ end of SizedCountWindow
 
@@ -393,9 +388,8 @@ public class InMemExecutorTest {
     }
 
     @Override
-    public TriggerResult onMerge(SizedCountWindow window, TriggerContext.TriggerMergeContext ctx) {
+    public void onMerge(SizedCountWindow window, TriggerContext.TriggerMergeContext ctx) {
       ctx.mergeStoredState(countDesc);
-      return TriggerResult.NOOP;
     }
   } // ~ end of SizedCountTrigger
 
@@ -415,7 +409,7 @@ public class InMemExecutorTest {
         .keyBy(i -> i % 10)
         .valueBy(e -> e)
         .stateFactory(SortState::new)
-        .combineStateBy(SortState::combine)
+        .mergeStatesBy(SortState::combine)
         .windowBy(windowing)
         .output();
 
@@ -581,10 +575,11 @@ public class InMemExecutorTest {
 
     ListDataSink<Long> outputs = ListDataSink.get(2);
 
+    input = AssignEventTime.of(input).using(e -> e * 1000L).output();
     ReduceWindow.of(input)
         .valueBy(e -> 1L)
         .combineBy(Sums.ofLongs())
-        .windowBy(Time.of(Duration.ofSeconds(10)), e -> e * 1000L)
+        .windowBy(Time.of(Duration.ofSeconds(10)))
         .setNumPartitions(1)
         .output()
         .persist(outputs);
@@ -637,10 +632,11 @@ public class InMemExecutorTest {
 
     ListDataSink<Long> outputs = ListDataSink.get(2);
 
+    input = AssignEventTime.of(input).using(e -> e * 1000L).output();
     ReduceWindow.of(input)
         .valueBy(e -> 1L)
         .combineBy(Sums.ofLongs())
-        .windowBy(Time.of(Duration.ofSeconds(10)), e -> e * 1000L)
+        .windowBy(Time.of(Duration.ofSeconds(10)))
         .setNumPartitions(1)
         .output()
         .persist(outputs);
@@ -679,14 +675,14 @@ public class InMemExecutorTest {
           }
           return grp;
         })
-        .windowBy(Batch.get())
+        .windowBy(GlobalWindowing.get())
         .output();
 
     // explode it back to the original input (maybe reordered)
     // and store it as the original input, process it further in
     // the same way as in `testWithWatermarkAndEventTime'
     input = FlatMap.of(reduced)
-        .using((Set<Integer> grp, Context<Integer> c) -> {
+        .using((Set<Integer> grp, Collector<Integer> c) -> {
           for (Integer i : grp) {
             c.collect(i);
           }
@@ -694,10 +690,11 @@ public class InMemExecutorTest {
 
     ListDataSink<Long> outputs = ListDataSink.get(1);
 
-    ReduceWindow.of(input)
+    input = AssignEventTime.of(input).using(e -> e * 1000L).output();
+    ReduceWindow.named("foo").of(input)
         .valueBy(e -> 1L)
         .combineBy(Sums.ofLongs())
-        .windowBy(Time.of(Duration.ofSeconds(10)), e -> e * 1000L)
+        .windowBy(Time.of(Duration.ofSeconds(10)))
         .setNumPartitions(1)
         .output()
         .persist(outputs);
@@ -705,7 +702,7 @@ public class InMemExecutorTest {
     // watermarking 100 ms
     executor.setTriggeringSchedulerSupplier(
         () -> new WatermarkTriggerScheduler(100));
-    
+
     executor.submit(flow).get();
 
     // the data in first unfinished partition
@@ -741,10 +738,11 @@ public class InMemExecutorTest {
 
     ListDataSink<Integer> outputs = ListDataSink.get(1);
 
+    input = AssignEventTime.of(input).using(e -> e * 1000L).output();
     ReduceWindow.of(input)
         .valueBy(e -> e)
         .combineBy(Sums.ofInts())
-        .windowBy(Time.of(Duration.ofSeconds(1)), e -> e * 1000L)
+        .windowBy(Time.of(Duration.ofSeconds(1)))
         .setNumPartitions(1)
         .output()
         .persist(outputs);

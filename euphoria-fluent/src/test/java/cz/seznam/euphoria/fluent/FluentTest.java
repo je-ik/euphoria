@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,7 +17,7 @@ package cz.seznam.euphoria.fluent;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.Count;
 import cz.seznam.euphoria.core.client.functional.ReduceFunction;
-import cz.seznam.euphoria.core.client.io.Context;
+import cz.seznam.euphoria.core.client.io.Collector;
 import cz.seznam.euphoria.core.client.io.ListDataSink;
 import cz.seznam.euphoria.core.client.io.ListDataSource;
 import cz.seznam.euphoria.core.client.operator.ReduceByKey;
@@ -50,7 +50,7 @@ public class FluentTest {
             .windowBy(Count.of(3)))
         // ~ strip the needless key and flatten out the elements thereby
         // creating multiple elements in the output belonging to the same window
-        .flatMap((Pair<String, Set<String>> e, Context<String> c) ->
+        .flatMap((Pair<String, Set<String>> e, Collector<String> c) ->
             e.getSecond().stream().forEachOrdered(c::collect))
         // ~ now spread the elements (belonging to the same window) over
         // multiple partitions

@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,9 +17,11 @@ package cz.seznam.euphoria.flink.streaming.windowing;
 
 import cz.seznam.euphoria.core.client.dataset.windowing.Window;
 import cz.seznam.euphoria.core.client.dataset.windowing.Windowing;
-import cz.seznam.euphoria.core.client.functional.CombinableReduceFunction;
-import cz.seznam.euphoria.core.client.functional.StateFactory;
 import cz.seznam.euphoria.core.client.operator.state.State;
+import cz.seznam.euphoria.core.client.operator.state.StateFactory;
+import cz.seznam.euphoria.core.client.operator.state.StateMerger;
+import cz.seznam.euphoria.core.util.Settings;
+import cz.seznam.euphoria.flink.accumulators.FlinkAccumulatorFactory;
 import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 
 /**
@@ -29,18 +31,23 @@ import org.apache.flink.streaming.runtime.streamrecord.StreamRecord;
 public class KeyedMultiWindowedElementWindowOperator<KEY, WID extends Window>
         extends AbstractWindowOperator<KeyedMultiWindowedElement<WID, KEY, ?>, KEY, WID> {
 
-    public KeyedMultiWindowedElementWindowOperator(
-            Windowing<?, WID> windowing,
-            StateFactory<?, State> stateFactory,
-            CombinableReduceFunction<State> stateCombiner,
-            boolean localMode,
-            int descriptorsCacheMaxSize) {
-        super(windowing, stateFactory, stateCombiner, localMode, descriptorsCacheMaxSize);
-    }
+  public KeyedMultiWindowedElementWindowOperator(
+          Windowing<?, WID> windowing,
+          StateFactory<?, ?, State<?, ?>> stateFactory,
+          StateMerger<?, ?, State<?, ?>> stateCombiner,
+          boolean localMode,
+          int descriptorsCacheMaxSize,
+          boolean allowEarlyEmitting,
+          FlinkAccumulatorFactory accumulatorFactory,
+          Settings settings) {
+    super(windowing, stateFactory, stateCombiner, localMode,
+            descriptorsCacheMaxSize, allowEarlyEmitting,
+            accumulatorFactory, settings);
+  }
 
-    @Override
-    protected KeyedMultiWindowedElement<WID, KEY, ?>
-    recordValue(StreamRecord<KeyedMultiWindowedElement<WID, KEY, ?>> record) {
-        return record.getValue();
-    }
+  @Override
+  protected KeyedMultiWindowedElement<WID, KEY, ?>
+  recordValue(StreamRecord<KeyedMultiWindowedElement<WID, KEY, ?>> record) {
+    return record.getValue();
+  }
 }

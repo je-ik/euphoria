@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -42,10 +42,9 @@ public class StateAwareWindowWiseSingleInputOperator<
           Flow flow, Dataset<IN> input,
           UnaryFunction<KIN, KEY> extractor,
           @Nullable Windowing<WIN, W> windowing,
-          @Nullable ExtractEventTime<WIN> eventTimeAssigner,
           Partitioning<KEY> partitioning) {
     
-    super(name, flow, windowing, eventTimeAssigner, extractor, partitioning);
+    super(name, flow, windowing, extractor, partitioning);
     this.input = input;
     this.output = createOutput(input);
   }
@@ -63,5 +62,4 @@ public class StateAwareWindowWiseSingleInputOperator<
   public Dataset<OUT> output() {
     return output;
   }
-
 }

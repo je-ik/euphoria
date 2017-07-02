@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -131,7 +131,9 @@ class MergingWindowSet<W extends Window> {
       mergedWindows.remove(mergeResult);
 
       // If no window is actually merged we can skip merging phase.
-      if (mergedWindows.isEmpty()) continue;
+      if (mergedWindows.isEmpty()) {
+        continue;
+      }
 
       // Pick any of the merged windows and choose that window's state window
       // as the state window for the merge result

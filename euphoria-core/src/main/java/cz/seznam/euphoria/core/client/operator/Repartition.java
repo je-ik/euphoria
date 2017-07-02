@@ -1,5 +1,5 @@
 /**
- * Copyright 2016 Seznam.cz, a.s.
+ * Copyright 2016-2017 Seznam.cz, a.s.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,33 @@ import cz.seznam.euphoria.core.client.flow.Flow;
 import java.util.Objects;
 
 /**
- * Repartition input to some other number of partitions.
+ * Repartition the input dataset. Repartioning allows 1) to redistribute
+ * a dataset's elements across their partitions and/or 2) to define the
+ * number of partitions of a dataset.
+ *
+ * Example:
+ *
+ * <pre>{@code
+ *   Dataset<String> strings = ...;
+ *   strings = Repartition
+ *      .of(strings)
+ *      .setNumPartitions(10)
+ *      .setPartitioner(new HashPartitioner<>())
+ *      .output();
+ * }</pre>
+ *
+ * Here, the input dataset is repartitioned into 10 partitions, distributing
+ * the elements based on their hash code as computed by `String#hashCode`.<p>
+ *
+ * {@code #setNumPartitions} is optional and will default to the number of
+ * partitions of the input dataset. Effectively merely redistributing the
+ * dataset elements according to the specified partitioner.<p>
+ *
+ * Also {@code #setPartitioner} is optional, defaulting to
+ * {@link cz.seznam.euphoria.core.client.dataset.partitioning.HashPartitioner}.
+ *
+ * Note: as with all Euphoria operators, you must continue to use the
+ * repartition operator's output dataset to make the operation effective.
  */
 @Basic(
     state = StateComplexity.ZERO,
@@ -35,13 +61,14 @@ public class Repartition<IN>
     implements PartitioningAware<IN>
 {
 
-  public static class OfBuilder {
+  public static class OfBuilder implements Builders.Of {
     private final String name;
 
     OfBuilder(String name) {
       this.name = name;
     }
 
+    @Override
     public <IN> OutputBuilder<IN> of(Dataset<IN> input) {
       return new OutputBuilder<>(name, input);
     }
@@ -49,7 +76,7 @@ public class Repartition<IN>
 
   public static class OutputBuilder<IN>
       extends PartitioningBuilder<IN, OutputBuilder<IN>>
-      implements cz.seznam.euphoria.core.client.operator.OutputBuilder<IN>
+      implements Builders.Output<IN>
   {
     private final String name;
     private final Dataset<IN> input;
@@ -71,10 +98,30 @@ public class Repartition<IN>
     }
   }
 
+  /**
+   * Starts building a nameless {@link Repartition} operator over the given
+   * input dataset.
+   *
+   * @param <IN> the type of elements in the input dataset
+   *
+   * @param input the input dataset to process
+   *
+   * @return a builder to complete the setup of the {@link Repartition} operator
+   *
+   * @see #named(String)
+   * @see OfBuilder#of(Dataset)
+   */
   public static <IN> OutputBuilder<IN> of(Dataset<IN> input) {
     return new OutputBuilder<>("Repartition", input);
   }
 
+  /**
+   * Starts building a named {@link Repartition} operator.
+   *
+   * @param name a user provided name of the new operator to build
+   *
+   * @return a builder to complete the setup of the new {@link Repartition} operator
+   */
   public static OfBuilder named(String name) {
     return new OfBuilder(name);
   }
@@ -87,10 +134,14 @@ public class Repartition<IN>
     this.partitioning = partitioning;
   }
 
+  /**
+   * Retrieves the partitioning information according which this operators
+   * input dataset is to be redistributed.
+   *
+   * @return the partitioning schema of this {@link Repartition} operator
+   */
   @Override
   public Partitioning<IN> getPartitioning() {
     return partitioning;
   }
-
-
 }
