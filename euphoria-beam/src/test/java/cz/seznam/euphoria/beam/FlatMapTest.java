@@ -39,6 +39,7 @@ public class FlatMapTest {
     flow = Flow.create();
   }
 
+  
   @Test
   public void testSimpleMap() {
     ListDataSource<Integer> input = ListDataSource.bounded(

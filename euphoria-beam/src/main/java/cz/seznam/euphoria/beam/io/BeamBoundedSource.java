@@ -19,11 +19,10 @@ package cz.seznam.euphoria.beam.io;
 import cz.seznam.euphoria.core.client.io.DataSource;
 import cz.seznam.euphoria.core.client.io.Partition;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
-import java.util.stream.Collectors;
-import javax.annotation.Nullable;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
@@ -33,21 +32,16 @@ import org.apache.beam.sdk.options.PipelineOptions;
  */
 public class BeamBoundedSource<T> extends BoundedSource<T> {
   
-  public static <T> BeamBoundedSource wrap(DataSource<T> wrap) {
-    return new BeamBoundedSource<>(wrap);
+  public static <T> BeamBoundedSource wrap(DataSource<T> wrap, int partitionId) {
+    return new BeamBoundedSource<>(wrap, partitionId);
   }
 
   final DataSource<T> wrap;
-  @Nullable
-  Partition<T> partition;
+  final int partitionId;
 
-  private BeamBoundedSource(DataSource<T> wrap) {
+  private BeamBoundedSource(DataSource<T> wrap, int partitionId) {
     this.wrap = Objects.requireNonNull(wrap);
-  }
-
-  private BeamBoundedSource(DataSource<T> wrap, Partition<T> partition) {
-    this.wrap = wrap;
-    this.partition = partition;
+    this.partitionId = partitionId;
   }
 
   @Override
@@ -55,9 +49,7 @@ public class BeamBoundedSource<T> extends BoundedSource<T> {
       throws Exception {
 
     // the split is defined by the source itself
-    return wrap.getPartitions().stream()
-        .map(p -> new BeamBoundedSource<>(wrap, p))
-        .collect(Collectors.toList());
+    return Arrays.asList(this);
   }
 
   @Override
@@ -68,10 +60,7 @@ public class BeamBoundedSource<T> extends BoundedSource<T> {
 
   @Override
   public BoundedReader<T> createReader(PipelineOptions po) throws IOException {
-    Objects.requireNonNull(
-        partition,
-        "Partition cannot be null, the source for concrete partition has to be "
-            + "create by calling the `split` method");
+    Partition<T> partition = wrap.getPartitions().get(partitionId);
     cz.seznam.euphoria.core.client.io.Reader<T> reader = partition.openReader();
     return new BoundedReader<T>() {
 

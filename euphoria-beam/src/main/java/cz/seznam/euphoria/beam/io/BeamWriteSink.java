@@ -19,8 +19,6 @@ package cz.seznam.euphoria.beam.io;
 import cz.seznam.euphoria.core.client.io.DataSink;
 import cz.seznam.euphoria.core.client.io.Writer;
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.Objects;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.transforms.DoFn;
@@ -28,12 +26,14 @@ import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.windowing.BoundedWindow;
 import org.apache.beam.sdk.values.PCollection;
+import org.apache.beam.sdk.values.PCollectionList;
 import org.apache.beam.sdk.values.PDone;
 
 /**
  * Write to output sink using beam.
  */
-public class BeamWriteSink<T> extends PTransform<PCollection<T>, PDone> {
+@DoFn.BoundedPerElement
+public class BeamWriteSink<T> extends PTransform<PCollectionList<T>, PDone> {
   
   public static <T> BeamWriteSink<T> wrap(Pipeline pipeline, DataSink<T> sink) {
     return new BeamWriteSink<>(pipeline, sink);
@@ -42,34 +42,31 @@ public class BeamWriteSink<T> extends PTransform<PCollection<T>, PDone> {
   private static final class WriteFn<T> extends DoFn<T, Void> {
 
     final DataSink<T> sink;
-    Map<Integer, Writer<T>> openWriters = new HashMap<>();
+    final int partitionId;
+    Writer<T> writer = null;
 
-    WriteFn(DataSink<T> sink) {
+    WriteFn(int partitionId, DataSink<T> sink) {
+      this.partitionId = partitionId;
       this.sink = sink;
+    }
+
+    @Setup
+    public void setup() {
+      writer = sink.openWriter(partitionId);
     }
 
     @ProcessElement
     public void processElement(ProcessContext c, BoundedWindow window) throws IOException {
-      int partitionId = (int) c.pane().getIndex();
-      Writer<T> writer = openWriters.get(partitionId);
-      if (writer == null) {
-        openWriters.put(partitionId, writer = sink.openWriter(partitionId));
-      }
       T element = c.element();
       writer.write(element);
     }
 
-    @FinishBundle
-    public void finishBundle(FinishBundleContext c) throws Exception {
-      openWriters.values().forEach(w -> {
-        try {
-          w.commit();
-          w.close();
-        } catch (IOException ex) {
-          throw new RuntimeException(ex);
-        }
-      });
+    @Teardown
+    public void finish() throws IOException{
+      writer.commit();
+      writer.close();
     }
+
   }
 
   private final Pipeline pipeline;
@@ -81,8 +78,11 @@ public class BeamWriteSink<T> extends PTransform<PCollection<T>, PDone> {
   }
 
   @Override
-  public PDone expand(PCollection<T> input) {
-    input.apply(ParDo.of(new WriteFn<>(sink)));
+  public PDone expand(PCollectionList<T> input) {
+    int partitionId = 0;
+    for (PCollection<T> partition : input.getAll()) {
+      partition.apply(ParDo.of(new WriteFn<>(partitionId++, sink)));
+    }
     return PDone.in(pipeline);
   }
 

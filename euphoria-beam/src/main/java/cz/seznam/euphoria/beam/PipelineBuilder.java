@@ -18,7 +18,6 @@ package cz.seznam.euphoria.beam;
 
 import cz.seznam.euphoria.beam.io.BeamBoundedSource;
 import cz.seznam.euphoria.beam.io.BeamWriteSink;
-import cz.seznam.euphoria.beam.io.ListCollector;
 import cz.seznam.euphoria.core.client.dataset.Dataset;
 import cz.seznam.euphoria.core.client.functional.UnaryFunctor;
 import cz.seznam.euphoria.core.client.graph.DAG;
@@ -43,9 +42,8 @@ import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.Read;
 import org.apache.beam.sdk.repackaged.org.apache.commons.lang3.tuple.Pair;
 import org.apache.beam.sdk.transforms.FlatMapElements;
-import org.apache.beam.sdk.transforms.PTransform;
 import org.apache.beam.sdk.values.PCollection;
-import org.apache.beam.sdk.values.POutput;
+import org.apache.beam.sdk.values.PCollectionList;
 
 /**
  * This class converts Euphoria's {@code Flow} into Beam's Pipeline.
@@ -54,14 +52,14 @@ class PipelineBuilder {
 
   @SuppressWarnings("unchecked")
   private static class Context {
-    final Map<Dataset, PCollection> mapping = new HashMap<>();
-    void addAll(Map<Dataset<?>, PCollection<?>> mappings) {
+    final Map<Dataset, PCollectionList> mapping = new HashMap<>();
+    void addAll(Map<Dataset<?>, PCollectionList<?>> mappings) {
       mapping.putAll(mappings);
     }
-    Optional<PCollection<?>> get(Dataset<?> dataset) {
-      return Optional.ofNullable((PCollection<?>)mapping.get(dataset));
+    Optional<PCollectionList<?>> get(Dataset<?> dataset) {
+      return Optional.ofNullable((PCollectionList<?>)mapping.get(dataset));
     }
-    void put(Dataset<?> dataset, PCollection<?> collection) {
+    void put(Dataset<?> dataset, PCollectionList<?> collection) {
       if (mapping.put(dataset, collection) != null) {
         throw new IllegalArgumentException(
             "PCollection for dataset " + dataset
@@ -83,18 +81,22 @@ class PipelineBuilder {
     context.addAll(sources.stream()
         .map(ds -> {
           DataSource<?> source = ds.getSource();
-          BeamBoundedSource<?> wrapped = BeamBoundedSource.wrap(source);
-          return Pair.of(ds, pipeline.apply(Read.from(wrapped)));
+          PCollectionList<?> collections = PCollectionList.empty(pipeline);
+          for (int partitionId = 0; partitionId < source.getPartitions().size(); partitionId++) {
+            collections = collections.and((PCollection) pipeline.apply(
+                Read.from(BeamBoundedSource.wrap(source, partitionId))));
+          }
+          return Pair.of(ds, collections);
         })
         .collect(Collectors.toMap(Pair::getLeft, Pair::getRight)));
     DAG<Operator<?, ?>> dag = FlowUnfolder.unfold(flow, basicOps());
     dag.traverse().forEach(n -> add(context, n));
     dag.getLeafs().forEach(l -> {
       Dataset<?> output = l.get().output();
-      PCollection<?> outputCollection = context.get(output).orElseThrow(
+      PCollectionList outputCollection = context.get(output).orElseThrow(
           () -> new IllegalStateException("Dataset " + output + " has not been materialized"));
       DataSink<?> sink = output.getOutputSink();
-      outputCollection.apply((PTransform) BeamWriteSink.wrap(pipeline, sink));
+      outputCollection.apply(BeamWriteSink.wrap(pipeline, sink));
     });
     return pipeline;
   }
@@ -115,14 +117,16 @@ class PipelineBuilder {
     FlatMap op = (FlatMap) node.get();
     Node<Operator<?, ?>> parent = Iterables.getOnlyElement(node.getParents());
     Dataset<?> inputDataset = parent.get().output();
-    PCollection input = context.get(inputDataset).orElseThrow(
+    PCollectionList<?> input = context.get(inputDataset).orElseThrow(
         () -> new IllegalStateException("Dataset " + inputDataset + " is not materialized yet"));
     UnaryFunctor functor = op.getFunctor();
-    ListCollector collector = new ListCollector();
     FlatMapper mapper = new FlatMapper(functor);
-    POutput result = input.apply(FlatMapElements
-        .<Object, Object>via(mapper));
-    context.put(op.output(), (PCollection<?>) result);
+    PCollectionList<?> output = PCollectionList.empty(input.getPipeline());
+    for (PCollection<?> partition : input.getAll()) {
+      output = output.and((PCollection) partition.apply(
+          FlatMapElements.<Object, Object>via(mapper)));
+    }
+    context.put(op.output(), output);
   }
 
   @SuppressWarnings("unchecked")
