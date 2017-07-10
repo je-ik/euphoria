@@ -16,13 +16,15 @@
 
 package cz.seznam.euphoria.beam;
 
+import static org.junit.Assert.assertEquals;
 import cz.seznam.euphoria.core.client.io.ListDataSink;
 import cz.seznam.euphoria.core.client.io.ListDataSource;
 import cz.seznam.euphoria.core.client.operator.MapElements;
 import java.util.Arrays;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.PipelineResult;
-import static org.junit.Assert.*;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -42,6 +44,11 @@ public class FlatMapTest {
   
   @Test
   public void testSimpleMap() {
+//    String[] args = {"--runner=FlinkRunner"};
+    String[] args = {"--runner=DirectRunner"};
+//    String[] args = {"--runner=SparkRunner"};
+    PipelineOptions options = PipelineOptionsFactory.fromArgs(args).as(PipelineOptions.class);
+
     ListDataSource<Integer> input = ListDataSource.bounded(
         Arrays.asList(1, 2, 3),
         Arrays.asList(2, 3, 4));
@@ -52,7 +59,7 @@ public class FlatMapTest {
         .output()
         .persist(output);
 
-    Pipeline pipeline = flow.toPipeline();
+    Pipeline pipeline = flow.toPipeline(options);
     PipelineResult result = pipeline.run();
     PipelineResult.State state = result.waitUntilFinish();
     assertEquals(PipelineResult.State.DONE, state);

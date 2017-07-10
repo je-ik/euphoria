@@ -20,6 +20,8 @@ import cz.seznam.euphoria.core.util.Settings;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import javax.annotation.Nullable;
 import org.apache.beam.sdk.Pipeline;
+import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.options.PipelineOptionsFactory;
 
 /**
  * Extension of {@code cz.seznam.euphoria.core.client.flow.Flow} that wraps {@code Pipeline}.
@@ -50,7 +52,6 @@ public class Flow extends cz.seznam.euphoria.core.client.flow.Flow {
     return new Flow(flowName, new Settings());
   }
 
-
   /**
    * Creates a new Flow.
    *
@@ -63,17 +64,21 @@ public class Flow extends cz.seznam.euphoria.core.client.flow.Flow {
     return new Flow(flowName, settings);
   }
 
-
   protected Flow(@Nullable String name, Settings settings) {
     super(name, settings);
   }
-
 
   /**
    * Convert this flow to Beam's {@code Pipeline}.
    */
   public Pipeline toPipeline() {
-    return PipelineBuilder.toPipeline(this);
+    return toPipeline(PipelineOptionsFactory.create());
   }
 
+  /**
+   * Convert this flow to Beam's {@code Pipeline}.
+   */
+  public Pipeline toPipeline(PipelineOptions options) {
+    return PipelineBuilder.toPipeline(this, options);
+  }
 }

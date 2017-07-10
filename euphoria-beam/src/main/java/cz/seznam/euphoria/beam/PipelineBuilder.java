@@ -40,6 +40,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.apache.beam.sdk.Pipeline;
 import org.apache.beam.sdk.io.Read;
+import org.apache.beam.sdk.options.PipelineOptions;
 import org.apache.beam.sdk.repackaged.org.apache.commons.lang3.tuple.Pair;
 import org.apache.beam.sdk.transforms.FlatMapElements;
 import org.apache.beam.sdk.values.PCollection;
@@ -73,9 +74,9 @@ class PipelineBuilder {
    * @param flow the {@code Flow} to convert
    */
   @SuppressWarnings("unchecked")
-  static Pipeline toPipeline(Flow flow) {
+  static Pipeline toPipeline(Flow flow, PipelineOptions options) {
     // FIXME: names, and other options here
-    Pipeline pipeline = Pipeline.create();
+    Pipeline pipeline = Pipeline.create(options);
     Context context = new Context();
     Collection<Dataset<?>> sources = flow.sources();
     context.addAll(sources.stream()
@@ -110,10 +111,7 @@ class PipelineBuilder {
   }
 
   @SuppressWarnings("unchecked")
-  private static void flatMap(
-      Context context,
-      Node<Operator<?, ?>> node) {
-
+  private static void flatMap(Context context, Node<Operator<?, ?>> node) {
     FlatMap op = (FlatMap) node.get();
     Node<Operator<?, ?>> parent = Iterables.getOnlyElement(node.getParents());
     Dataset<?> inputDataset = parent.get().output();
@@ -134,7 +132,4 @@ class PipelineBuilder {
     return (Set) Sets.newHashSet(
         FlatMap.class, Union.class, Repartition.class, ReduceStateByKey.class);
   }
-
-
-  
 }
