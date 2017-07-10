@@ -55,15 +55,25 @@ public class BeamWriteSink<T> extends PTransform<PCollectionList<T>, PDone> {
       writer = sink.openWriter(partitionId);
     }
 
+    @StartBundle
+    public void startBundle(StartBundleContext c) throws IOException {
+
+    }
+
     @ProcessElement
     public void processElement(ProcessContext c, BoundedWindow window) throws IOException {
       T element = c.element();
       writer.write(element);
     }
 
-    @Teardown
-    public void finish() throws IOException{
+    @FinishBundle
+    public void finishBundle() throws Exception {
       writer.commit();
+    }
+
+    @Teardown
+    public void tearDown() throws IOException{
+      writer.flush();
       writer.close();
     }
 
